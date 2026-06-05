@@ -6,6 +6,8 @@ set -euo pipefail
 # or
 #   bash examples/LIBERO/data_preparation.sh /path/to/dir
 
+export HF_ENDPOINT=https://hf-mirror.com
+
 DEST="${DEST:-${1:-}}"
 if [[ -z "${DEST}" ]]; then
   echo "ERROR: DEST is not set."
@@ -17,7 +19,7 @@ fi
 CUR="$(pwd)"
 mkdir -p "$DEST"
 
-python -m pip install -U "huggingface-hub==0.35.3"
+# python -m pip install -U "huggingface-hub==0.35.3"
 
 for repo in \
   IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot \

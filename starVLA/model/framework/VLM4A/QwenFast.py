@@ -206,10 +206,12 @@ class Qwenvl_Fast(baseframework):
         # Step 1: QWenVL input format
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
 
+        eval_max_new_tokens = int(self.config.trainer.get("eval_max_new_tokens", 64))
         with torch.autocast("cuda", dtype=torch.bfloat16):
             generated_ids = self.qwen_vl_interface.model.generate(
                 **qwen_inputs,
-                max_length=2048,
+                max_new_tokens=eval_max_new_tokens,
+                do_sample=False,
             )
         # --- Extract and decoder vlm_action to continue actions ---
         # --- extrace token (index based on VLM) ---

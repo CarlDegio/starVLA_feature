@@ -349,6 +349,9 @@ class VLATrainer(TrainerUtils):
     def eval_action_model(self, step_metrics: dict = None) -> float:
         """Run simple action-eval on current batch and attach score to metrics."""
         examples = self._get_next_batch()
+        eval_batch_size = getattr(self.config.trainer, "eval_batch_size", None)
+        if eval_batch_size is not None:
+            examples = examples[: int(eval_batch_size)]
         actions = [example["action"] for example in examples]
         output_dict = self.accelerator.unwrap_model(self.model).predict_action(
             examples=examples, use_ddim=True, num_ddim_steps=20
