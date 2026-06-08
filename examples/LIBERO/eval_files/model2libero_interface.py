@@ -81,10 +81,33 @@ class ModelClient:
 
         # Cached unnormalized chunk; refreshed every `action_chunk_size` steps.
         self.raw_actions: Optional[np.ndarray] = None
+        self.chunk_uncertainty: Optional[dict] = None
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
         self.image_history.append(image)
         self.num_image_history = min(self.num_image_history + 1, self.horizon)
+
+    @staticmethod
+    def _first_batch_scalar(value) -> Optional[float]:
+        if value is None:
+            return None
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.size == 0:
+            return None
+        return float(arr.reshape(-1)[0])
+
+    @staticmethod
+    def _first_batch_sequence(value) -> Optional[list[float]]:
+        if value is None:
+            return None
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.size == 0:
+            return []
+        if arr.ndim <= 1:
+            seq = arr.reshape(-1)
+        else:
+            seq = arr[0].reshape(-1)
+        return [float(x) for x in seq]
 
     def reset(self, task_description: str) -> None:
         self.task_description = task_description
@@ -97,6 +120,7 @@ class ModelClient:
         self.sticky_gripper_action = 0.0
         self.previous_gripper_action = None
         self.raw_actions = None
+        self.chunk_uncertainty = None
 
     def step(self, example: dict, step: int = 0, **kwargs) -> dict:
         """One env step.
@@ -128,7 +152,8 @@ class ModelClient:
             example = {**example, "image": resized}
 
         # Refresh chunk if needed.
-        if step % self.action_chunk_size == 0 or self.raw_actions is None:
+        refresh_chunk = step % self.action_chunk_size == 0 or self.raw_actions is None
+        if refresh_chunk:
             vla_input = {
                 "examples": [example],
                 "unnorm_key": self.unnorm_key,
@@ -145,6 +170,20 @@ class ModelClient:
                     f"full response={response}"
                 )
             self.raw_actions = np.asarray(actions_batch)[0]  # (T, D)
+            data = response.get("data", {})
+            chunk_idx = int(step // self.action_chunk_size)
+            chunk_mean = self._first_batch_scalar(data.get("uncertainty"))
+            token_uncertainty = self._first_batch_sequence(data.get("token_uncertainty"))
+            if chunk_mean is None and token_uncertainty:
+                chunk_mean = float(np.mean(token_uncertainty))
+            self.chunk_uncertainty = None
+            if chunk_mean is not None or token_uncertainty is not None:
+                self.chunk_uncertainty = {
+                    "chunk_idx": chunk_idx,
+                    "chunk_mean": chunk_mean,
+                    "num_tokens": len(token_uncertainty or []),
+                    "token_uncertainty": token_uncertainty or [],
+                }
 
         raw_actions = self.raw_actions[step % self.action_chunk_size][None]
         raw_action = {
@@ -152,7 +191,11 @@ class ModelClient:
             "rotation_delta": np.array(raw_actions[0, 3:6]),
             "open_gripper": np.array(raw_actions[0, 6:7]),  # 1 = open; 0 = close
         }
-        return {"raw_action": raw_action}
+        return {
+            "raw_action": raw_action,
+            "new_chunk": refresh_chunk,
+            "uncertainty": self.chunk_uncertainty if refresh_chunk else None,
+        }
 
     def visualize_epoch(
         self, predicted_raw_actions: Sequence[np.ndarray], images: Sequence[np.ndarray], save_path: str

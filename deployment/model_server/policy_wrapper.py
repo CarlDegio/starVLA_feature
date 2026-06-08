@@ -159,4 +159,8 @@ class PolicyServerWrapper:
             [proc.unapply_actions(normalized[b]) for b in range(normalized.shape[0])],
             axis=0,
         )
-        return {"actions": unnorm}
+        ret = {"actions": unnorm}
+        for key in ("uncertainty", "token_uncertainty"):
+            if key in out:
+                ret[key] = np.asarray(out[key])
+        return ret

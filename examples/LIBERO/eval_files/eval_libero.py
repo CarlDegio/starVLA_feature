@@ -6,12 +6,18 @@ import os
 import pathlib
 import time
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
 import imageio
+import matplotlib
 import numpy as np
 import tqdm
 import tyro
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from examples.LIBERO.eval_files.model2libero_interface import ModelClient
@@ -126,6 +132,7 @@ def eval_libero(args: Args) -> None:
             t = 0
             replay_images = []
             full_actions = []
+            uncertainty_chunks = []
 
             logging.info(f"Starting episode {task_episodes + 1}...")
             step = 0
@@ -172,6 +179,11 @@ def eval_libero(args: Args) -> None:
                 start_time = time.time()
 
                 response = client_model.step(example=example_dict, step=step)
+                if response.get("new_chunk") and response.get("uncertainty") is not None:
+                    uncertainty_record = dict(response["uncertainty"])
+                    uncertainty_record["env_step"] = int(t)
+                    uncertainty_record["policy_step"] = int(step)
+                    uncertainty_chunks.append(uncertainty_record)
 
                 end_time = time.time()
                 # print(f"time: {end_time - start_time}")
@@ -215,11 +227,13 @@ def eval_libero(args: Args) -> None:
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
+            rollout_base = pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}"
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                rollout_base.parent / f"{rollout_base.name}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )
+            _save_uncertainty_artifacts(uncertainty_chunks, rollout_base)
 
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
@@ -250,6 +264,55 @@ def _get_libero_env(task, resolution, seed):
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
+
+
+def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pathlib.Path) -> None:
+    """Save chunk/token uncertainty as JSONL and a compact two-panel plot."""
+    jsonl_path = rollout_base.parent / f"{rollout_base.name}.jsonl"
+    png_path = rollout_base.parent / f"{rollout_base.name}.png"
+
+    with jsonl_path.open("w", encoding="utf-8") as f:
+        for record in uncertainty_chunks:
+            f.write(json.dumps(record) + "\n")
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=False)
+
+    token_x, token_y = [], []
+    chunk_x, chunk_y = [], []
+    for record in uncertainty_chunks:
+        chunk_idx = int(record.get("chunk_idx", len(chunk_x)))
+        tokens = np.asarray(record.get("token_uncertainty", []), dtype=np.float32).reshape(-1)
+        if tokens.size > 0:
+            xs = chunk_idx + (np.arange(tokens.size, dtype=np.float32) + 0.5) / float(tokens.size)
+            token_x.extend(xs.tolist())
+            token_y.extend(tokens.tolist())
+
+        chunk_mean = record.get("chunk_mean", None)
+        if chunk_mean is not None:
+            chunk_x.append(chunk_idx)
+            chunk_y.append(float(chunk_mean))
+
+    if token_x:
+        axes[0].scatter(token_x, token_y, s=10, alpha=0.75)
+    else:
+        axes[0].text(0.5, 0.5, "No token uncertainty", ha="center", va="center", transform=axes[0].transAxes)
+    axes[0].set_title("Token uncertainty within each generated chunk")
+    axes[0].set_xlabel("Chunk index")
+    axes[0].set_ylabel("Uncertainty")
+    axes[0].grid(True, alpha=0.25)
+
+    if chunk_x:
+        axes[1].plot(chunk_x, chunk_y, marker="o", linewidth=1.5)
+    else:
+        axes[1].text(0.5, 0.5, "No chunk uncertainty", ha="center", va="center", transform=axes[1].transAxes)
+    axes[1].set_title("Mean uncertainty per chunk")
+    axes[1].set_xlabel("Chunk index")
+    axes[1].set_ylabel("Mean uncertainty")
+    axes[1].grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=160)
+    plt.close(fig)
 
 
 def _quat2axisangle(quat):

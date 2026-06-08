@@ -247,14 +247,12 @@ class Qwenvl_EDL(baseframework):
         batch_fast_action_token_idx = self._decode_action_tokens(batch_vlm_action_token_ids)
         normalized_actions = self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
 
-        token_uncertainty, token_confidence, uncertainty = self._compute_generation_uncertainty(generated)
+        token_uncertainty, uncertainty = self._compute_generation_uncertainty(generated)
 
         return {
             "normalized_actions": normalized_actions,
             "uncertainty": uncertainty,
             "token_uncertainty": token_uncertainty,
-            "token_confidence": token_confidence,
-            "generated_token_ids": generated_ids.detach().cpu().numpy(),
         }
 
     def _action_token_range(self) -> Tuple[int, int]:
@@ -345,28 +343,24 @@ class Qwenvl_EDL(baseframework):
 
         return candidate_logits, target_pos, gt_in_topk
 
-    def _compute_generation_uncertainty(self, generated: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _compute_generation_uncertainty(self, generated: Any) -> Tuple[np.ndarray, np.ndarray]:
         if not hasattr(generated, "scores") or generated.scores is None or len(generated.scores) == 0:
             batch_size = int(generated.sequences.size(0)) if hasattr(generated, "sequences") else 0
             empty = np.zeros((batch_size, 0), dtype=np.float32)
-            return empty, empty, np.ones((batch_size,), dtype=np.float32)
+            return empty, np.ones((batch_size,), dtype=np.float32)
 
         step_uncertainties = []
-        step_confidences = []
         topk = int(self.edl_topk)
         for step_scores in generated.scores:
             scores = step_scores.float()
             step_topk = min(topk, scores.size(-1))
             topk_scores, _ = scores.topk(step_topk, dim=-1)
             alpha = self._logits_to_alpha(topk_scores)
-            probs = alpha / alpha.sum(dim=-1, keepdim=True)
             step_uncertainties.append((step_topk / alpha.sum(dim=-1)).detach())
-            step_confidences.append(probs.max(dim=-1).values.detach())
 
         token_uncertainty = torch.stack(step_uncertainties, dim=1).float().cpu().numpy()
-        token_confidence = torch.stack(step_confidences, dim=1).float().cpu().numpy()
         uncertainty = token_uncertainty.mean(axis=1)
-        return token_uncertainty, token_confidence, uncertainty
+        return token_uncertainty, uncertainty
 
     def _edl_data_loss(self, alpha: torch.Tensor, target_onehot: torch.Tensor) -> torch.Tensor:
         S = alpha.sum(dim=-1, keepdim=True)
