@@ -355,6 +355,14 @@ class VLAMTrainer(TrainerUtils):
                     "vlm_loss": vlm_loss.item(),
                 }
             )
+            for key, value in output_dict.items():
+                if key == "action_loss":
+                    continue
+                if isinstance(value, torch.Tensor):
+                    if value.numel() == 1:
+                        log_dict[key] = value.detach().float().item()
+                elif isinstance(value, (int, float)):
+                    log_dict[key] = value
 
         return log_dict
 

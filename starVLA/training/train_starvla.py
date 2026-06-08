@@ -401,9 +401,17 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
 
-        return {
-            "action_dit_loss": action_loss.item(),
-        }
+        log_dict = {"action_dit_loss": action_loss.item()}
+        for key, value in output_dict.items():
+            if key == "action_loss":
+                continue
+            if isinstance(value, torch.Tensor):
+                if value.numel() == 1:
+                    log_dict[key] = value.detach().float().item()
+            elif isinstance(value, (int, float)):
+                log_dict[key] = value
+
+        return log_dict
 
     def _finalize_training(self):
         """Training end processing."""
