@@ -160,7 +160,16 @@ class PolicyServerWrapper:
             axis=0,
         )
         ret = {"actions": unnorm}
-        for key in ("uncertainty", "token_uncertainty"):
+        for key in (
+            "uncertainty",
+            "token_uncertainty",
+            "action_token_confidence",
+            "action_token_confidence_mean",
+            "action_token_rank",
+            "action_token_evidence",
+            "action_token_confidence_threshold",
+            "action_token_confidence_above_threshold_ratio",
+        ):
             if key in out:
                 ret[key] = np.asarray(out[key])
         return ret

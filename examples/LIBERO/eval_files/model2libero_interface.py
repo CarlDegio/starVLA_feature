@@ -107,6 +107,7 @@ class ModelClient:
             seq = arr.reshape(-1)
         else:
             seq = arr[0].reshape(-1)
+        seq = seq[np.isfinite(seq)]
         return [float(x) for x in seq]
 
     def reset(self, task_description: str) -> None:
@@ -174,15 +175,59 @@ class ModelClient:
             chunk_idx = int(step // self.action_chunk_size)
             chunk_mean = self._first_batch_scalar(data.get("uncertainty"))
             token_uncertainty = self._first_batch_sequence(data.get("token_uncertainty"))
+            action_token_confidence_mean = self._first_batch_scalar(
+                data.get(
+                    "action_token_confidence_mean",
+                    data.get("selected_token_confidence_mean", data.get("selected_evidence_mean")),
+                )
+            )
+            action_token_confidence = self._first_batch_sequence(
+                data.get("action_token_confidence", data.get("selected_token_confidence", data.get("selected_evidence")))
+            )
+            action_token_rank = self._first_batch_sequence(data.get("action_token_rank"))
+            action_token_evidence = self._first_batch_sequence(data.get("action_token_evidence"))
+            action_token_confidence_threshold = self._first_batch_scalar(
+                data.get("action_token_confidence_threshold")
+            )
+            action_token_confidence_above_threshold_ratio = self._first_batch_scalar(
+                data.get("action_token_confidence_above_threshold_ratio")
+            )
             if chunk_mean is None and token_uncertainty:
                 chunk_mean = float(np.mean(token_uncertainty))
+            if action_token_confidence_mean is None and action_token_confidence:
+                action_token_confidence_mean = float(np.mean(action_token_confidence))
+            if action_token_confidence_threshold is None and action_token_confidence:
+                action_token_confidence_threshold = 1.0 / 25.0 + 0.01
+            if (
+                action_token_confidence_above_threshold_ratio is None
+                and action_token_confidence
+                and action_token_confidence_threshold is not None
+            ):
+                action_token_confidence_above_threshold_ratio = float(
+                    np.mean(np.asarray(action_token_confidence, dtype=np.float32) > action_token_confidence_threshold)
+                )
             self.chunk_uncertainty = None
-            if chunk_mean is not None or token_uncertainty is not None:
+            if (
+                chunk_mean is not None
+                or token_uncertainty is not None
+                or action_token_confidence_mean is not None
+                or action_token_confidence is not None
+                or action_token_rank is not None
+                or action_token_evidence is not None
+                or action_token_confidence_above_threshold_ratio is not None
+            ):
                 self.chunk_uncertainty = {
                     "chunk_idx": chunk_idx,
                     "chunk_mean": chunk_mean,
                     "num_tokens": len(token_uncertainty or []),
+                    "num_action_tokens": len(action_token_confidence or []),
                     "token_uncertainty": token_uncertainty or [],
+                    "action_token_confidence_mean": action_token_confidence_mean,
+                    "action_token_confidence": action_token_confidence or [],
+                    "action_token_rank": action_token_rank or [],
+                    "action_token_evidence": action_token_evidence or [],
+                    "action_token_confidence_threshold": action_token_confidence_threshold,
+                    "action_token_confidence_above_threshold_ratio": action_token_confidence_above_threshold_ratio,
                 }
 
         raw_actions = self.raw_actions[step % self.action_chunk_size][None]

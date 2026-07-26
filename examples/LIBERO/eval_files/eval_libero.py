@@ -267,7 +267,7 @@ def _get_libero_env(task, resolution, seed):
 
 
 def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pathlib.Path) -> None:
-    """Save chunk/token uncertainty as JSONL and a compact two-panel plot."""
+    """Save chunk/token uncertainty as JSONL and a compact diagnostic plot."""
     jsonl_path = rollout_base.parent / f"{rollout_base.name}.jsonl"
     png_path = rollout_base.parent / f"{rollout_base.name}.png"
 
@@ -275,10 +275,13 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
         for record in uncertainty_chunks:
             f.write(json.dumps(record) + "\n")
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=False)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 8), sharex=False)
 
     token_x, token_y = [], []
     chunk_x, chunk_y = [], []
+    confidence_token_x, confidence_token_y = [], []
+    confidence_ratio_x, confidence_ratio_y = [], []
+    evidence_token_x, evidence_token_y = [], []
     for record in uncertainty_chunks:
         chunk_idx = int(record.get("chunk_idx", len(chunk_x)))
         tokens = np.asarray(record.get("token_uncertainty", []), dtype=np.float32).reshape(-1)
@@ -292,23 +295,97 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
             chunk_x.append(chunk_idx)
             chunk_y.append(float(chunk_mean))
 
+        action_token_confidence = np.asarray(
+            record.get(
+                "action_token_confidence",
+                record.get("selected_token_confidence", record.get("selected_evidence", [])),
+            ),
+            dtype=np.float32,
+        ).reshape(-1)
+        action_token_confidence = action_token_confidence[np.isfinite(action_token_confidence)]
+        if action_token_confidence.size > 0:
+            xs = chunk_idx + (np.arange(action_token_confidence.size, dtype=np.float32) + 0.5) / float(
+                action_token_confidence.size
+            )
+            confidence_token_x.extend(xs.tolist())
+            confidence_token_y.extend(action_token_confidence.tolist())
+
+        confidence_ratio = record.get("action_token_confidence_above_threshold_ratio", None)
+        if confidence_ratio is None and action_token_confidence.size > 0:
+            threshold = float(record.get("action_token_confidence_threshold", 1.0 / 25.0 + 0.01))
+            confidence_ratio = float(np.mean(action_token_confidence > threshold))
+        if confidence_ratio is not None:
+            confidence_ratio_x.append(chunk_idx)
+            confidence_ratio_y.append(float(confidence_ratio))
+
+        action_token_evidence = np.asarray(record.get("action_token_evidence", []), dtype=np.float32).reshape(-1)
+        action_token_evidence = action_token_evidence[np.isfinite(action_token_evidence)]
+        if action_token_evidence.size > 0:
+            action_token_evidence = np.clip(action_token_evidence, 0.0, 50.0)
+            xs = chunk_idx + (np.arange(action_token_evidence.size, dtype=np.float32) + 0.5) / float(
+                action_token_evidence.size
+            )
+            evidence_token_x.extend(xs.tolist())
+            evidence_token_y.extend(action_token_evidence.tolist())
+
     if token_x:
-        axes[0].scatter(token_x, token_y, s=10, alpha=0.75)
+        axes[0, 0].scatter(token_x, token_y, s=10, alpha=0.75)
     else:
-        axes[0].text(0.5, 0.5, "No token uncertainty", ha="center", va="center", transform=axes[0].transAxes)
-    axes[0].set_title("Token uncertainty within each generated chunk")
-    axes[0].set_xlabel("Chunk index")
-    axes[0].set_ylabel("Uncertainty")
-    axes[0].grid(True, alpha=0.25)
+        axes[0, 0].text(
+            0.5, 0.5, "No token uncertainty", ha="center", va="center", transform=axes[0, 0].transAxes
+        )
+    axes[0, 0].set_title("Token uncertainty within each generated chunk")
+    axes[0, 0].set_xlabel("Chunk index")
+    axes[0, 0].set_ylabel("Uncertainty")
+    axes[0, 0].grid(True, alpha=0.25)
 
     if chunk_x:
-        axes[1].plot(chunk_x, chunk_y, marker="o", linewidth=1.5)
+        axes[1, 0].plot(chunk_x, chunk_y, marker="o", linewidth=1.5)
     else:
-        axes[1].text(0.5, 0.5, "No chunk uncertainty", ha="center", va="center", transform=axes[1].transAxes)
-    axes[1].set_title("Mean uncertainty per chunk")
-    axes[1].set_xlabel("Chunk index")
-    axes[1].set_ylabel("Mean uncertainty")
-    axes[1].grid(True, alpha=0.25)
+        axes[1, 0].text(
+            0.5, 0.5, "No chunk uncertainty", ha="center", va="center", transform=axes[1, 0].transAxes
+        )
+    axes[1, 0].set_title("Mean uncertainty per chunk")
+    axes[1, 0].set_xlabel("Chunk index")
+    axes[1, 0].set_ylabel("Mean uncertainty")
+    axes[1, 0].grid(True, alpha=0.25)
+
+    if confidence_token_x:
+        axes[0, 1].scatter(confidence_token_x, confidence_token_y, s=10, alpha=0.75, color="tab:orange")
+    else:
+        axes[0, 1].text(
+            0.5, 0.5, "No action-token confidence", ha="center", va="center", transform=axes[0, 1].transAxes
+        )
+    axes[0, 1].set_title("Action-token confidence within each generated chunk")
+    axes[0, 1].set_xlabel("Chunk index")
+    axes[0, 1].set_ylabel("Confidence")
+    axes[0, 1].set_ylim(0.0, 1.0)
+    axes[0, 1].grid(True, alpha=0.25)
+
+    if evidence_token_x:
+        axes[0, 2].scatter(evidence_token_x, evidence_token_y, s=10, alpha=0.75, color="tab:green")
+    else:
+        axes[0, 2].text(
+            0.5, 0.5, "No action-token evidence", ha="center", va="center", transform=axes[0, 2].transAxes
+        )
+    axes[0, 2].set_title("Action-token evidence within each generated chunk")
+    axes[0, 2].set_xlabel("Chunk index")
+    axes[0, 2].set_ylabel("Evidence")
+    axes[0, 2].set_ylim(0.0, 50.0)
+    axes[0, 2].grid(True, alpha=0.25)
+
+    if confidence_ratio_x:
+        axes[1, 1].plot(confidence_ratio_x, confidence_ratio_y, marker="o", linewidth=1.5, color="tab:orange")
+    else:
+        axes[1, 1].text(
+            0.5, 0.5, "No action-token confidence ratio", ha="center", va="center", transform=axes[1, 1].transAxes
+        )
+    axes[1, 1].set_title("Action-token confidence above-threshold ratio per chunk")
+    axes[1, 1].set_xlabel("Chunk index")
+    axes[1, 1].set_ylabel("Ratio")
+    axes[1, 1].set_ylim(0.0, 1.0)
+    axes[1, 1].grid(True, alpha=0.25)
+    axes[1, 2].axis("off")
 
     fig.tight_layout()
     fig.savefig(png_path, dpi=160)

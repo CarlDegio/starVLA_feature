@@ -128,7 +128,7 @@ class Qwenvl_EDL(baseframework):
         # to plumb new fields through the training scripts.
         self.edl_loss_type = "digamma"  # "mse" | "log" | "digamma"
         self.edl_topk = 25
-        self.edl_kl_weight = 0.01
+        self.edl_kl_weight = 0.0000
         self.edl_annealing_steps = 15000
         self.edl_evidence_fn = "softplus"  # "softplus" | "relu" | "exp"
         self.register_buffer("_edl_step", torch.zeros((), dtype=torch.long), persistent=False)
@@ -247,12 +247,27 @@ class Qwenvl_EDL(baseframework):
         batch_fast_action_token_idx = self._decode_action_tokens(batch_vlm_action_token_ids)
         normalized_actions = self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
 
-        token_uncertainty, uncertainty = self._compute_generation_uncertainty(generated)
+        (
+            token_uncertainty,
+            uncertainty,
+            action_token_confidence,
+            action_token_confidence_mean,
+            action_token_rank,
+            action_token_evidence,
+            action_token_confidence_threshold,
+            action_token_confidence_above_threshold_ratio,
+        ) = self._compute_generation_uncertainty(generated)
 
         return {
             "normalized_actions": normalized_actions,
             "uncertainty": uncertainty,
             "token_uncertainty": token_uncertainty,
+            "action_token_confidence": action_token_confidence,
+            "action_token_confidence_mean": action_token_confidence_mean,
+            "action_token_rank": action_token_rank,
+            "action_token_evidence": action_token_evidence,
+            "action_token_confidence_threshold": action_token_confidence_threshold,
+            "action_token_confidence_above_threshold_ratio": action_token_confidence_above_threshold_ratio,
         }
 
     def _action_token_range(self) -> Tuple[int, int]:
@@ -343,24 +358,111 @@ class Qwenvl_EDL(baseframework):
 
         return candidate_logits, target_pos, gt_in_topk
 
-    def _compute_generation_uncertainty(self, generated: Any) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_generation_uncertainty(
+        self, generated: Any
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if not hasattr(generated, "scores") or generated.scores is None or len(generated.scores) == 0:
             batch_size = int(generated.sequences.size(0)) if hasattr(generated, "sequences") else 0
             empty = np.zeros((batch_size, 0), dtype=np.float32)
-            return empty, np.ones((batch_size,), dtype=np.float32)
+            empty_scalar = np.zeros((batch_size,), dtype=np.float32)
+            return (
+                empty,
+                np.ones((batch_size,), dtype=np.float32),
+                empty,
+                empty_scalar,
+                empty,
+                empty,
+                empty_scalar,
+                empty_scalar,
+            )
 
         step_uncertainties = []
+        step_selected_confidences = []
+        step_selected_evidences = []
+        step_action_ranks = []
         topk = int(self.edl_topk)
+        num_generated_tokens = len(generated.scores)
+        generated_token_ids = generated.sequences[:, -num_generated_tokens:]
+        act_min, act_max = self._action_token_range()
+        num_action_tokens = act_max - act_min + 1
         for step_scores in generated.scores:
+            step_idx = len(step_uncertainties)
             scores = step_scores.float()
             step_topk = min(topk, scores.size(-1))
             topk_scores, _ = scores.topk(step_topk, dim=-1)
             alpha = self._logits_to_alpha(topk_scores)
             step_uncertainties.append((step_topk / alpha.sum(dim=-1)).detach())
+            selected_ids = generated_token_ids[:, step_idx].to(device=scores.device)
+            action_logits = scores[:, act_min : act_max + 1]
+            action_topk = min(topk, num_action_tokens)
+            action_topk_scores, _ = action_logits.topk(action_topk, dim=-1)
+            action_alpha = self._logits_to_alpha(action_topk_scores)
+            selected_action_idx = (selected_ids - act_min).clamp(min=0, max=num_action_tokens - 1)
+            selected_action_scores = action_logits.gather(dim=-1, index=selected_action_idx[:, None]).squeeze(-1)
+            selected_action_alpha = self._logits_to_alpha(selected_action_scores)
+            step_selected_confidences.append((selected_action_alpha / action_alpha.sum(dim=-1)).detach())
+            step_selected_evidences.append((selected_action_alpha - 1.0).detach())
+            step_action_ranks.append((action_logits.gt(selected_action_scores[:, None]).sum(dim=-1) + 1).detach())
 
         token_uncertainty = torch.stack(step_uncertainties, dim=1).float().cpu().numpy()
+        selected_token_confidence = torch.stack(step_selected_confidences, dim=1)
+        action_token_mask = (generated_token_ids >= act_min) & (generated_token_ids <= act_max)
+        action_token_confidence = self._select_ragged_with_padding(
+            selected_token_confidence.float(), action_token_mask
+        )
+        action_token_rank = self._select_ragged_with_padding(torch.stack(step_action_ranks, dim=1).float(), action_token_mask)
+        action_token_evidence = self._select_ragged_with_padding(
+            torch.stack(step_selected_evidences, dim=1).float(), action_token_mask
+        )
         uncertainty = token_uncertainty.mean(axis=1)
-        return token_uncertainty, uncertainty
+        action_token_confidence_mean = self._nanmean_with_empty_zero(action_token_confidence, axis=1)
+        action_token_confidence_threshold = np.full(
+            (action_token_confidence.shape[0],), 1.0 / float(action_topk) + 0.01, dtype=np.float32
+        )
+        action_token_confidence_above_threshold_ratio = self._above_threshold_ratio_with_empty_zero(
+            action_token_confidence, action_token_confidence_threshold
+        )
+        return (
+            token_uncertainty,
+            uncertainty,
+            action_token_confidence,
+            action_token_confidence_mean,
+            action_token_rank,
+            action_token_evidence,
+            action_token_confidence_threshold,
+            action_token_confidence_above_threshold_ratio,
+        )
+
+    def _select_ragged_with_padding(self, values: torch.Tensor, mask: torch.Tensor) -> np.ndarray:
+        rows = []
+        max_len = 0
+        for batch_idx in range(values.size(0)):
+            row = values[batch_idx][mask[batch_idx]].detach().cpu().numpy().astype(np.float32)
+            rows.append(row)
+            max_len = max(max_len, row.shape[0])
+
+        if max_len == 0:
+            return np.zeros((values.size(0), 0), dtype=np.float32)
+
+        padded = np.full((values.size(0), max_len), np.nan, dtype=np.float32)
+        for batch_idx, row in enumerate(rows):
+            padded[batch_idx, : row.shape[0]] = row
+        return padded
+
+    def _nanmean_with_empty_zero(self, values: np.ndarray, axis: int) -> np.ndarray:
+        if values.size == 0:
+            return np.zeros((values.shape[0],), dtype=np.float32)
+        counts = np.sum(np.isfinite(values), axis=axis)
+        sums = np.nansum(values, axis=axis)
+        return np.divide(sums, counts, out=np.zeros_like(sums, dtype=np.float32), where=counts > 0)
+
+    def _above_threshold_ratio_with_empty_zero(self, values: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
+        if values.size == 0:
+            return np.zeros((values.shape[0],), dtype=np.float32)
+        finite = np.isfinite(values)
+        counts = np.sum(finite, axis=1)
+        above = np.sum((values > thresholds[:, None]) & finite, axis=1)
+        return np.divide(above, counts, out=np.zeros_like(thresholds, dtype=np.float32), where=counts > 0)
 
     def _edl_data_loss(self, alpha: torch.Tensor, target_onehot: torch.Tensor) -> torch.Tensor:
         S = alpha.sum(dim=-1, keepdim=True)

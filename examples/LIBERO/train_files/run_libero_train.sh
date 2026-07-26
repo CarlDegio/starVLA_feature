@@ -17,7 +17,7 @@ config_yaml=./examples/LIBERO/train_files/starvla_cotrain_libero.yaml
 libero_data_root=playground/Datasets/LEROBOT_LIBERO_DATA
 data_mix=libero_all
 run_root_dir=./playground/Checkpoints
-run_id=qwen3fast_libero_all_edl
+run_id=qwen3fast_libero_all_edl_0
 # === End of environment variable configuration ===
 ###########################################################################################
 
@@ -44,7 +44,7 @@ accelerate launch \
   --datasets.vla_data.per_device_batch_size 8 \
   --datasets.vla_data.video_backend torchvision_av \
   --trainer.eval_batch_size 4 \
-  --trainer.eval_max_new_tokens 32 \
+  --trainer.eval_max_new_tokens 256 \
   --trainer.freeze_modules "${freeze_module_list}" \
   --trainer.max_train_steps 30000 \
   --trainer.save_interval 15000 \
