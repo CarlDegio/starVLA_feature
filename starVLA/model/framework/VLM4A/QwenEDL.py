@@ -254,6 +254,8 @@ class Qwenvl_EDL(baseframework):
             action_token_confidence_mean,
             action_token_rank,
             action_token_evidence,
+            action_token_aleatoric_uncertainty,
+            action_token_epistemic_uncertainty,
             action_token_confidence_threshold,
             action_token_confidence_above_threshold_ratio,
         ) = self._compute_generation_uncertainty(generated)
@@ -266,6 +268,8 @@ class Qwenvl_EDL(baseframework):
             "action_token_confidence_mean": action_token_confidence_mean,
             "action_token_rank": action_token_rank,
             "action_token_evidence": action_token_evidence,
+            "action_token_aleatoric_uncertainty": action_token_aleatoric_uncertainty,
+            "action_token_epistemic_uncertainty": action_token_epistemic_uncertainty,
             "action_token_confidence_threshold": action_token_confidence_threshold,
             "action_token_confidence_above_threshold_ratio": action_token_confidence_above_threshold_ratio,
         }
@@ -360,7 +364,18 @@ class Qwenvl_EDL(baseframework):
 
     def _compute_generation_uncertainty(
         self, generated: Any
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
         if not hasattr(generated, "scores") or generated.scores is None or len(generated.scores) == 0:
             batch_size = int(generated.sequences.size(0)) if hasattr(generated, "sequences") else 0
             empty = np.zeros((batch_size, 0), dtype=np.float32)
@@ -372,6 +387,8 @@ class Qwenvl_EDL(baseframework):
                 empty_scalar,
                 empty,
                 empty,
+                empty,
+                empty,
                 empty_scalar,
                 empty_scalar,
             )
@@ -379,6 +396,8 @@ class Qwenvl_EDL(baseframework):
         step_uncertainties = []
         step_selected_confidences = []
         step_selected_evidences = []
+        step_action_aleatoric_uncertainties = []
+        step_action_epistemic_uncertainties = []
         step_action_ranks = []
         topk = int(self.edl_topk)
         num_generated_tokens = len(generated.scores)
@@ -397,6 +416,17 @@ class Qwenvl_EDL(baseframework):
             action_topk = min(topk, num_action_tokens)
             action_topk_scores, _ = action_logits.topk(action_topk, dim=-1)
             action_alpha = self._logits_to_alpha(action_topk_scores)
+            action_strength = action_alpha.sum(dim=-1, keepdim=True)
+            action_probs = action_alpha / action_strength
+            action_au = (
+                action_probs
+                * (torch.digamma(action_strength + 1.0) - torch.digamma(action_alpha + 1.0))
+            ).sum(dim=-1)
+            if action_topk > 1:
+                action_au = action_au / float(np.log(action_topk))
+            action_eu = float(action_topk) / action_strength.squeeze(-1)
+            step_action_aleatoric_uncertainties.append(action_au.detach())
+            step_action_epistemic_uncertainties.append(action_eu.detach())
             selected_action_idx = (selected_ids - act_min).clamp(min=0, max=num_action_tokens - 1)
             selected_action_scores = action_logits.gather(dim=-1, index=selected_action_idx[:, None]).squeeze(-1)
             selected_action_alpha = self._logits_to_alpha(selected_action_scores)
@@ -410,9 +440,17 @@ class Qwenvl_EDL(baseframework):
         action_token_confidence = self._select_ragged_with_padding(
             selected_token_confidence.float(), action_token_mask
         )
-        action_token_rank = self._select_ragged_with_padding(torch.stack(step_action_ranks, dim=1).float(), action_token_mask)
+        action_token_rank = self._select_ragged_with_padding(
+            torch.stack(step_action_ranks, dim=1).float(), action_token_mask
+        )
         action_token_evidence = self._select_ragged_with_padding(
             torch.stack(step_selected_evidences, dim=1).float(), action_token_mask
+        )
+        action_token_aleatoric_uncertainty = self._select_ragged_with_padding(
+            torch.stack(step_action_aleatoric_uncertainties, dim=1).float(), action_token_mask
+        )
+        action_token_epistemic_uncertainty = self._select_ragged_with_padding(
+            torch.stack(step_action_epistemic_uncertainties, dim=1).float(), action_token_mask
         )
         uncertainty = token_uncertainty.mean(axis=1)
         action_token_confidence_mean = self._nanmean_with_empty_zero(action_token_confidence, axis=1)
@@ -429,6 +467,8 @@ class Qwenvl_EDL(baseframework):
             action_token_confidence_mean,
             action_token_rank,
             action_token_evidence,
+            action_token_aleatoric_uncertainty,
+            action_token_epistemic_uncertainty,
             action_token_confidence_threshold,
             action_token_confidence_above_threshold_ratio,
         )

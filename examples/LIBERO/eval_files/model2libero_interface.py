@@ -25,6 +25,10 @@ from deployment.model_server.tools.websocket_policy_client import WebsocketClien
 from examples.SimplerEnv.eval_files.adaptive_ensemble import AdaptiveEnsembler
 
 
+PROVISIONAL_LOW_EVIDENCE_THRESHOLD = 4.0
+WORST_TOKEN_COUNT = 3
+
+
 class ModelClient:
     def __init__(
         self,
@@ -110,6 +114,15 @@ class ModelClient:
         seq = seq[np.isfinite(seq)]
         return [float(x) for x in seq]
 
+    @staticmethod
+    def _max_consecutive_true(mask: np.ndarray) -> int:
+        max_run = 0
+        current_run = 0
+        for value in mask:
+            current_run = current_run + 1 if bool(value) else 0
+            max_run = max(max_run, current_run)
+        return max_run
+
     def reset(self, task_description: str) -> None:
         self.task_description = task_description
         self.image_history.clear()
@@ -186,6 +199,12 @@ class ModelClient:
             )
             action_token_rank = self._first_batch_sequence(data.get("action_token_rank"))
             action_token_evidence = self._first_batch_sequence(data.get("action_token_evidence"))
+            action_token_aleatoric_uncertainty = self._first_batch_sequence(
+                data.get("action_token_aleatoric_uncertainty")
+            )
+            action_token_epistemic_uncertainty = self._first_batch_sequence(
+                data.get("action_token_epistemic_uncertainty")
+            )
             action_token_confidence_threshold = self._first_batch_scalar(
                 data.get("action_token_confidence_threshold")
             )
@@ -206,6 +225,26 @@ class ModelClient:
                 action_token_confidence_above_threshold_ratio = float(
                     np.mean(np.asarray(action_token_confidence, dtype=np.float32) > action_token_confidence_threshold)
                 )
+
+            low_evidence_count = None
+            low_evidence_ratio = None
+            low_evidence_max_consecutive = None
+            if action_token_evidence is not None:
+                evidence = np.asarray(action_token_evidence, dtype=np.float32)
+                low_evidence_mask = evidence < PROVISIONAL_LOW_EVIDENCE_THRESHOLD
+                low_evidence_count = int(np.sum(low_evidence_mask))
+                low_evidence_ratio = float(np.mean(low_evidence_mask)) if evidence.size > 0 else 0.0
+                low_evidence_max_consecutive = self._max_consecutive_true(low_evidence_mask)
+
+            worst_token_eu_mean = None
+            if action_token_epistemic_uncertainty is not None:
+                epistemic = np.asarray(action_token_epistemic_uncertainty, dtype=np.float32)
+                if epistemic.size > 0:
+                    tail_size = min(WORST_TOKEN_COUNT, epistemic.size)
+                    worst_token_eu_mean = float(np.mean(np.sort(epistemic)[-tail_size:]))
+                else:
+                    worst_token_eu_mean = 0.0
+
             self.chunk_uncertainty = None
             if (
                 chunk_mean is not None
@@ -214,18 +253,38 @@ class ModelClient:
                 or action_token_confidence is not None
                 or action_token_rank is not None
                 or action_token_evidence is not None
+                or action_token_aleatoric_uncertainty is not None
+                or action_token_epistemic_uncertainty is not None
                 or action_token_confidence_above_threshold_ratio is not None
             ):
+                action_token_lengths = [
+                    len(values)
+                    for values in (
+                        action_token_confidence,
+                        action_token_evidence,
+                        action_token_aleatoric_uncertainty,
+                        action_token_epistemic_uncertainty,
+                    )
+                    if values is not None
+                ]
                 self.chunk_uncertainty = {
                     "chunk_idx": chunk_idx,
                     "chunk_mean": chunk_mean,
                     "num_tokens": len(token_uncertainty or []),
-                    "num_action_tokens": len(action_token_confidence or []),
+                    "num_action_tokens": max(action_token_lengths, default=0),
                     "token_uncertainty": token_uncertainty or [],
                     "action_token_confidence_mean": action_token_confidence_mean,
                     "action_token_confidence": action_token_confidence or [],
                     "action_token_rank": action_token_rank or [],
                     "action_token_evidence": action_token_evidence or [],
+                    "action_token_aleatoric_uncertainty": action_token_aleatoric_uncertainty or [],
+                    "action_token_epistemic_uncertainty": action_token_epistemic_uncertainty or [],
+                    "low_evidence_threshold": PROVISIONAL_LOW_EVIDENCE_THRESHOLD,
+                    "low_evidence_count": low_evidence_count,
+                    "low_evidence_ratio": low_evidence_ratio,
+                    "low_evidence_max_consecutive": low_evidence_max_consecutive,
+                    "worst_token_count": WORST_TOKEN_COUNT,
+                    "worst_token_eu_mean": worst_token_eu_mean,
                     "action_token_confidence_threshold": action_token_confidence_threshold,
                     "action_token_confidence_above_threshold_ratio": action_token_confidence_above_threshold_ratio,
                 }

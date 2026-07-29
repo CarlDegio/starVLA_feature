@@ -275,117 +275,220 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
         for record in uncertainty_chunks:
             f.write(json.dumps(record) + "\n")
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 8), sharex=False)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=False)
 
-    token_x, token_y = [], []
-    chunk_x, chunk_y = [], []
-    confidence_token_x, confidence_token_y = [], []
-    confidence_ratio_x, confidence_ratio_y = [], []
+    au_token_x, au_token_y = [], []
+    eu_token_x, eu_token_y = [], []
     evidence_token_x, evidence_token_y = [], []
+    chunk_x = []
+    low_evidence_count_y, low_evidence_run_y = [], []
+    worst_token_eu_y = []
+    quadrant_au, quadrant_eu, quadrant_is_low_evidence = [], [], []
     for record in uncertainty_chunks:
         chunk_idx = int(record.get("chunk_idx", len(chunk_x)))
-        tokens = np.asarray(record.get("token_uncertainty", []), dtype=np.float32).reshape(-1)
-        if tokens.size > 0:
-            xs = chunk_idx + (np.arange(tokens.size, dtype=np.float32) + 0.5) / float(tokens.size)
-            token_x.extend(xs.tolist())
-            token_y.extend(tokens.tolist())
-
-        chunk_mean = record.get("chunk_mean", None)
-        if chunk_mean is not None:
-            chunk_x.append(chunk_idx)
-            chunk_y.append(float(chunk_mean))
-
-        action_token_confidence = np.asarray(
-            record.get(
-                "action_token_confidence",
-                record.get("selected_token_confidence", record.get("selected_evidence", [])),
-            ),
-            dtype=np.float32,
+        action_token_au = np.asarray(
+            record.get("action_token_aleatoric_uncertainty", []), dtype=np.float32
         ).reshape(-1)
-        action_token_confidence = action_token_confidence[np.isfinite(action_token_confidence)]
-        if action_token_confidence.size > 0:
-            xs = chunk_idx + (np.arange(action_token_confidence.size, dtype=np.float32) + 0.5) / float(
-                action_token_confidence.size
-            )
-            confidence_token_x.extend(xs.tolist())
-            confidence_token_y.extend(action_token_confidence.tolist())
-
-        confidence_ratio = record.get("action_token_confidence_above_threshold_ratio", None)
-        if confidence_ratio is None and action_token_confidence.size > 0:
-            threshold = float(record.get("action_token_confidence_threshold", 1.0 / 25.0 + 0.01))
-            confidence_ratio = float(np.mean(action_token_confidence > threshold))
-        if confidence_ratio is not None:
-            confidence_ratio_x.append(chunk_idx)
-            confidence_ratio_y.append(float(confidence_ratio))
-
+        action_token_eu = np.asarray(
+            record.get("action_token_epistemic_uncertainty", []), dtype=np.float32
+        ).reshape(-1)
         action_token_evidence = np.asarray(record.get("action_token_evidence", []), dtype=np.float32).reshape(-1)
+        action_token_au = action_token_au[np.isfinite(action_token_au)]
+        action_token_eu = action_token_eu[np.isfinite(action_token_eu)]
         action_token_evidence = action_token_evidence[np.isfinite(action_token_evidence)]
+
+        for values, xs_out, ys_out in (
+            (action_token_au, au_token_x, au_token_y),
+            (action_token_eu, eu_token_x, eu_token_y),
+        ):
+            if values.size > 0:
+                xs = chunk_idx + (np.arange(values.size, dtype=np.float32) + 0.5) / float(values.size)
+                xs_out.extend(xs.tolist())
+                ys_out.extend(values.tolist())
+
+        low_evidence_threshold = float(record.get("low_evidence_threshold", 4.0))
+        low_evidence_mask = action_token_evidence < low_evidence_threshold
         if action_token_evidence.size > 0:
-            action_token_evidence = np.clip(action_token_evidence, 0.0, 50.0)
-            xs = chunk_idx + (np.arange(action_token_evidence.size, dtype=np.float32) + 0.5) / float(
-                action_token_evidence.size
+            clipped_evidence = np.clip(action_token_evidence, 0.0, 50.0)
+            xs = chunk_idx + (np.arange(clipped_evidence.size, dtype=np.float32) + 0.5) / float(
+                clipped_evidence.size
             )
             evidence_token_x.extend(xs.tolist())
-            evidence_token_y.extend(action_token_evidence.tolist())
+            evidence_token_y.extend(clipped_evidence.tolist())
 
-    if token_x:
-        axes[0, 0].scatter(token_x, token_y, s=10, alpha=0.75)
-    else:
-        axes[0, 0].text(
-            0.5, 0.5, "No token uncertainty", ha="center", va="center", transform=axes[0, 0].transAxes
-        )
-    axes[0, 0].set_title("Token uncertainty within each generated chunk")
-    axes[0, 0].set_xlabel("Chunk index")
-    axes[0, 0].set_ylabel("Uncertainty")
-    axes[0, 0].grid(True, alpha=0.25)
+        low_evidence_count = record.get("low_evidence_count")
+        if low_evidence_count is None:
+            low_evidence_count = int(np.sum(low_evidence_mask))
+        low_evidence_max_consecutive = record.get("low_evidence_max_consecutive")
+        if low_evidence_max_consecutive is None:
+            current_run = 0
+            low_evidence_max_consecutive = 0
+            for is_low in low_evidence_mask:
+                current_run = current_run + 1 if bool(is_low) else 0
+                low_evidence_max_consecutive = max(low_evidence_max_consecutive, current_run)
 
-    if chunk_x:
-        axes[1, 0].plot(chunk_x, chunk_y, marker="o", linewidth=1.5)
-    else:
-        axes[1, 0].text(
-            0.5, 0.5, "No chunk uncertainty", ha="center", va="center", transform=axes[1, 0].transAxes
-        )
-    axes[1, 0].set_title("Mean uncertainty per chunk")
-    axes[1, 0].set_xlabel("Chunk index")
-    axes[1, 0].set_ylabel("Mean uncertainty")
-    axes[1, 0].grid(True, alpha=0.25)
+        worst_token_eu_mean = record.get("worst_token_eu_mean")
+        if worst_token_eu_mean is None and action_token_eu.size > 0:
+            worst_token_count = min(int(record.get("worst_token_count", 3)), action_token_eu.size)
+            worst_token_eu_mean = float(np.mean(np.sort(action_token_eu)[-worst_token_count:]))
 
-    if confidence_token_x:
-        axes[0, 1].scatter(confidence_token_x, confidence_token_y, s=10, alpha=0.75, color="tab:orange")
-    else:
-        axes[0, 1].text(
-            0.5, 0.5, "No action-token confidence", ha="center", va="center", transform=axes[0, 1].transAxes
-        )
-    axes[0, 1].set_title("Action-token confidence within each generated chunk")
-    axes[0, 1].set_xlabel("Chunk index")
-    axes[0, 1].set_ylabel("Confidence")
-    axes[0, 1].set_ylim(0.0, 1.0)
-    axes[0, 1].grid(True, alpha=0.25)
+        chunk_x.append(chunk_idx)
+        low_evidence_count_y.append(float(low_evidence_count))
+        low_evidence_run_y.append(float(low_evidence_max_consecutive))
+        worst_token_eu_y.append(float(worst_token_eu_mean) if worst_token_eu_mean is not None else np.nan)
+
+        num_quadrant_tokens = min(action_token_au.size, action_token_eu.size)
+        if num_quadrant_tokens > 0:
+            quadrant_au.extend(action_token_au[:num_quadrant_tokens].tolist())
+            quadrant_eu.extend(action_token_eu[:num_quadrant_tokens].tolist())
+            if action_token_evidence.size >= num_quadrant_tokens:
+                quadrant_is_low_evidence.extend(low_evidence_mask[:num_quadrant_tokens].tolist())
+            else:
+                quadrant_is_low_evidence.extend([False] * num_quadrant_tokens)
+
+    for axis, xs, ys, title, ylabel, color in (
+        (
+            axes[0, 0],
+            au_token_x,
+            au_token_y,
+            "Action-token aleatoric uncertainty",
+            "Normalized AU",
+            "tab:orange",
+        ),
+        (
+            axes[0, 1],
+            eu_token_x,
+            eu_token_y,
+            "Action-token epistemic uncertainty",
+            "EU",
+            "tab:red",
+        ),
+    ):
+        if xs:
+            axis.scatter(xs, ys, s=10, alpha=0.75, color=color)
+        else:
+            axis.text(0.5, 0.5, "No action-token uncertainty", ha="center", va="center", transform=axis.transAxes)
+        axis.set_title(title)
+        axis.set_xlabel("Chunk index")
+        axis.set_ylabel(ylabel)
+        axis.set_ylim(0.0, 1.0)
+        axis.grid(True, alpha=0.25)
 
     if evidence_token_x:
         axes[0, 2].scatter(evidence_token_x, evidence_token_y, s=10, alpha=0.75, color="tab:green")
+        evidence_thresholds = [
+            float(record.get("low_evidence_threshold", 4.0)) for record in uncertainty_chunks
+        ]
+        axes[0, 2].axhline(
+            float(np.median(evidence_thresholds)),
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.2,
+            label="Provisional low-evidence threshold",
+        )
+        axes[0, 2].legend(loc="upper right", fontsize=8)
     else:
         axes[0, 2].text(
             0.5, 0.5, "No action-token evidence", ha="center", va="center", transform=axes[0, 2].transAxes
         )
-    axes[0, 2].set_title("Action-token evidence within each generated chunk")
+    axes[0, 2].set_title("Selected action-token evidence (display clipped)")
     axes[0, 2].set_xlabel("Chunk index")
     axes[0, 2].set_ylabel("Evidence")
     axes[0, 2].set_ylim(0.0, 50.0)
     axes[0, 2].grid(True, alpha=0.25)
 
-    if confidence_ratio_x:
-        axes[1, 1].plot(confidence_ratio_x, confidence_ratio_y, marker="o", linewidth=1.5, color="tab:orange")
+    if chunk_x:
+        axes[1, 0].bar(chunk_x, low_evidence_count_y, alpha=0.45, color="tab:red", label="Low count")
+        axes[1, 0].plot(
+            chunk_x,
+            low_evidence_run_y,
+            marker="o",
+            markersize=3,
+            linewidth=1.2,
+            color="black",
+            label="Longest consecutive run",
+        )
+        axes[1, 0].legend(loc="upper right", fontsize=8)
+    else:
+        axes[1, 0].text(
+            0.5, 0.5, "No low-evidence diagnostics", ha="center", va="center", transform=axes[1, 0].transAxes
+        )
+    axes[1, 0].set_title("Low-evidence action tokens per chunk")
+    axes[1, 0].set_xlabel("Chunk index")
+    axes[1, 0].set_ylabel("Token count")
+    axes[1, 0].grid(True, alpha=0.25)
+
+    finite_worst_eu = np.isfinite(np.asarray(worst_token_eu_y, dtype=np.float32))
+    if chunk_x and np.any(finite_worst_eu):
+        chunk_array = np.asarray(chunk_x, dtype=np.float32)
+        worst_eu_array = np.asarray(worst_token_eu_y, dtype=np.float32)
+        axes[1, 1].plot(
+            chunk_array[finite_worst_eu],
+            worst_eu_array[finite_worst_eu],
+            marker="o",
+            markersize=4,
+            linewidth=1.5,
+            color="tab:red",
+        )
     else:
         axes[1, 1].text(
-            0.5, 0.5, "No action-token confidence ratio", ha="center", va="center", transform=axes[1, 1].transAxes
+            0.5, 0.5, "No chunk epistemic risk", ha="center", va="center", transform=axes[1, 1].transAxes
         )
-    axes[1, 1].set_title("Action-token confidence above-threshold ratio per chunk")
+    axes[1, 1].set_title("Mean EU of worst action tokens per chunk")
     axes[1, 1].set_xlabel("Chunk index")
-    axes[1, 1].set_ylabel("Ratio")
+    axes[1, 1].set_ylabel("Worst-token mean EU")
     axes[1, 1].set_ylim(0.0, 1.0)
     axes[1, 1].grid(True, alpha=0.25)
-    axes[1, 2].axis("off")
+
+    if quadrant_au:
+        quadrant_au_array = np.asarray(quadrant_au, dtype=np.float32)
+        quadrant_eu_array = np.asarray(quadrant_eu, dtype=np.float32)
+        low_evidence_array = np.asarray(quadrant_is_low_evidence, dtype=bool)
+        axes[1, 2].scatter(
+            quadrant_au_array[~low_evidence_array],
+            quadrant_eu_array[~low_evidence_array],
+            s=12,
+            alpha=0.55,
+            color="tab:blue",
+            label="Normal evidence",
+        )
+        axes[1, 2].scatter(
+            quadrant_au_array[low_evidence_array],
+            quadrant_eu_array[low_evidence_array],
+            s=18,
+            alpha=0.85,
+            color="tab:red",
+            label="Low evidence",
+        )
+        au_split = float(np.median(quadrant_au_array))
+        eu_split = float(np.median(quadrant_eu_array))
+        axes[1, 2].axvline(au_split, color="gray", linestyle="--", linewidth=1.0)
+        axes[1, 2].axhline(eu_split, color="gray", linestyle="--", linewidth=1.0)
+        axes[1, 2].legend(loc="center right", fontsize=8)
+        axes[1, 2].text(0.02, 0.97, "Low AU / High EU", transform=axes[1, 2].transAxes, va="top", fontsize=8)
+        axes[1, 2].text(
+            0.98, 0.97, "High AU / High EU", transform=axes[1, 2].transAxes, ha="right", va="top", fontsize=8
+        )
+        axes[1, 2].text(0.02, 0.03, "Low AU / Low EU", transform=axes[1, 2].transAxes, va="bottom", fontsize=8)
+        axes[1, 2].text(
+            0.98,
+            0.03,
+            "High AU / Low EU",
+            transform=axes[1, 2].transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+        )
+    else:
+        axes[1, 2].text(
+            0.5, 0.5, "No AU-EU quadrant data", ha="center", va="center", transform=axes[1, 2].transAxes
+        )
+    axes[1, 2].set_title("Action-token AU-EU quadrants (median splits)")
+    axes[1, 2].set_xlabel("Normalized AU")
+    axes[1, 2].set_ylabel("EU")
+    axes[1, 2].set_xlim(0.0, 1.0)
+    axes[1, 2].set_ylim(0.0, 1.0)
+    axes[1, 2].grid(True, alpha=0.25)
 
     fig.tight_layout()
     fig.savefig(png_path, dpi=160)
