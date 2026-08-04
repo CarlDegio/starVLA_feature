@@ -78,6 +78,15 @@ def build_episode_splits(data_config: DataConfig, *, seed: int | None = None) ->
     return SplitManifest(tuple(sorted(train)), tuple(sorted(validation)), max_action_tokens)
 
 
+def index_suite_episodes(suite: str, path: str | Path) -> tuple[tuple[EpisodeRef, ...], int]:
+    """Index every episode in one collector HDF5 without creating a split."""
+    if not isinstance(suite, str) or not suite:
+        raise ValueError("suite must be a non-empty string")
+    resolved = Path(path).expanduser().resolve()
+    refs, observed_max = _index_suite(suite, resolved)
+    return tuple(refs), observed_max
+
+
 class TrajectoryDataset:
     """Lazily decode episode references without sharing HDF5 handles between workers."""
 
