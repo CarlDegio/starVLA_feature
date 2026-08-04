@@ -87,6 +87,10 @@ class ModelClient:
         self.raw_actions: Optional[np.ndarray] = None
         self.chunk_uncertainty: Optional[dict] = None
 
+    @property
+    def server_metadata(self) -> dict:
+        return dict(self._server_metadata)
+
     def _add_image_to_history(self, image: np.ndarray) -> None:
         self.image_history.append(image)
         self.num_image_history = min(self.num_image_history + 1, self.horizon)

@@ -1,4 +1,5 @@
 import dataclasses
+import atexit
 import json
 import logging
 import math
@@ -52,6 +53,10 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "experiments/libero/logs"  # Path to save videos
+    save_artifacts: bool = True
+    dataset_output_path: str | None = None
+    dataset_overwrite: bool = False
+    dataset_resume: bool = False
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -68,6 +73,11 @@ class Args:
 def eval_libero(args: Args) -> None:
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
 
+    if not args.save_artifacts and args.dataset_output_path is None:
+        raise ValueError("dataset_output_path is required when save_artifacts is disabled")
+    if (args.dataset_overwrite or args.dataset_resume) and args.dataset_output_path is None:
+        raise ValueError("dataset overwrite/resume requires dataset_output_path")
+
     # Set random seed
     np.random.seed(args.seed)
 
@@ -79,7 +89,8 @@ def eval_libero(args: Args) -> None:
 
     # args.video_out_path = f"{date_base}+{args.job_name}"
 
-    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    if args.save_artifacts:
+        pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -99,6 +110,9 @@ def eval_libero(args: Args) -> None:
         port=args.port,
         unnorm_key=args.unnorm_key,
     )
+    dataset_writer = _create_dataset_writer(args, client_model, max_steps)
+    if dataset_writer is not None:
+        atexit.register(dataset_writer.close)
 
     # Optional smoke-test cap (still useful for quick verification with -1 = full run).
     n_eval_tasks = num_tasks_in_suite if args.max_tasks <= 0 else min(args.max_tasks, num_tasks_in_suite)
@@ -119,6 +133,13 @@ def eval_libero(args: Args) -> None:
         # Start episodes
         task_episodes, task_successes = 0, 0
         for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
+            if dataset_writer is not None and dataset_writer.has_episode(task_id, episode_idx):
+                logging.info(
+                    "Skipping collected episode task_id=%d episode_idx=%d",
+                    task_id,
+                    episode_idx,
+                )
+                continue
             logging.info(f"\nTask: {task_description}")
 
             # Reset environment
@@ -133,6 +154,8 @@ def eval_libero(args: Args) -> None:
             replay_images = []
             full_actions = []
             uncertainty_chunks = []
+            executed_steps = 0
+            done = False
 
             logging.info(f"Starting episode {task_episodes + 1}...")
             step = 0
@@ -153,7 +176,8 @@ def eval_libero(args: Args) -> None:
                 wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
 
                 # Save preprocessed image for replay video
-                replay_images.append(img)
+                if args.save_artifacts:
+                    replay_images.append(img)
 
                 state = np.concatenate(
                     (
@@ -214,6 +238,7 @@ def eval_libero(args: Args) -> None:
                 # __import__("ipdb").set_trace()
                 # see ../robosuite/controllers/controller_factory.py
                 obs, reward, done, info = env.step(delta_action.tolist())
+                executed_steps += 1
                 if done:
                     task_successes += 1
                     total_successes += 1
@@ -224,16 +249,35 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            rollout_base = pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}"
-            imageio.mimwrite(
-                rollout_base.parent / f"{rollout_base.name}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
-            _save_uncertainty_artifacts(uncertainty_chunks, rollout_base)
+            if args.save_artifacts:
+                suffix = "success" if done else "failure"
+                task_segment = task_description.replace(" ", "_")
+                rollout_base = (
+                    pathlib.Path(args.video_out_path)
+                    / f"rollout_{task_segment}_episode{episode_idx}_{suffix}"
+                )
+                imageio.mimwrite(
+                    rollout_base.parent / f"{rollout_base.name}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=10,
+                )
+                _save_uncertainty_artifacts(
+                    uncertainty_chunks,
+                    rollout_base,
+                    max_steps=max_steps,
+                    action_chunk_size=client_model.action_chunk_size,
+                )
+
+            if dataset_writer is not None:
+                dataset_writer.append_episode(
+                    task_id=task_id,
+                    episode_idx=episode_idx,
+                    task_description=task_description,
+                    success=bool(done),
+                    executed_steps=executed_steps,
+                    termination_reason="success" if done else "max_steps",
+                    uncertainty_chunks=uncertainty_chunks,
+                )
 
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
@@ -245,11 +289,59 @@ def eval_libero(args: Args) -> None:
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
-        logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-        logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+        if task_episodes > 0:
+            logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+        else:
+            logging.info("No new episodes evaluated for this task")
+        if total_episodes > 0:
+            logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
+    if total_episodes > 0:
+        logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
+    else:
+        logging.info("No new episodes evaluated")
     logging.info(f"Total episodes: {total_episodes}")
+    if dataset_writer is not None:
+        dataset_writer.close()
+
+
+def _create_dataset_writer(args: Args, client_model: ModelClient, max_steps: int):
+    if args.dataset_output_path is None:
+        return None
+    if not args.pretrained_path:
+        raise ValueError("pretrained_path is required for dataset provenance")
+
+    server_metadata = client_model.server_metadata
+    server_checkpoint = server_metadata.get("ckpt_path")
+    if not server_checkpoint:
+        raise ValueError("policy server metadata does not include ckpt_path")
+    requested_checkpoint = pathlib.Path(args.pretrained_path).expanduser().resolve()
+    actual_checkpoint = pathlib.Path(server_checkpoint).expanduser().resolve()
+    if requested_checkpoint != actual_checkpoint:
+        raise ValueError(
+            f"checkpoint mismatch: collector requested {requested_checkpoint}, "
+            f"policy server loaded {actual_checkpoint}"
+        )
+
+    from examples.LIBERO.eval_files.libero_uncertainty_dataset import (
+        LiberoUncertaintyDatasetWriter,
+    )
+
+    metadata = {
+        "checkpoint_path": str(requested_checkpoint),
+        "server_checkpoint_path": str(actual_checkpoint),
+        "task_suite": args.task_suite_name,
+        "seed": args.seed,
+        "max_steps": max_steps,
+        "action_chunk_size": client_model.action_chunk_size,
+        "server_metadata": server_metadata,
+    }
+    return LiberoUncertaintyDatasetWriter(
+        args.dataset_output_path,
+        metadata,
+        overwrite=args.dataset_overwrite,
+        resume=args.dataset_resume,
+    )
 
 
 def _get_libero_env(task, resolution, seed):
@@ -266,8 +358,16 @@ def _get_libero_env(task, resolution, seed):
     return env, task_description
 
 
-def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pathlib.Path) -> None:
+def _save_uncertainty_artifacts(
+    uncertainty_chunks: list[dict],
+    rollout_base: pathlib.Path,
+    max_steps: int,
+    action_chunk_size: int,
+) -> None:
     """Save chunk/token uncertainty as JSONL and a compact diagnostic plot."""
+    if action_chunk_size <= 0:
+        raise ValueError("action_chunk_size must be positive")
+
     jsonl_path = rollout_base.parent / f"{rollout_base.name}.jsonl"
     png_path = rollout_base.parent / f"{rollout_base.name}.png"
 
@@ -275,15 +375,16 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
         for record in uncertainty_chunks:
             f.write(json.dumps(record) + "\n")
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=False)
+    fig, axes = plt.subplots(2, 4, figsize=(24, 9), sharex=False)
+    axes[0, 3].axis("off")
 
     au_token_x, au_token_y = [], []
     eu_token_x, eu_token_y = [], []
     evidence_token_x, evidence_token_y = [], []
     chunk_x = []
-    low_evidence_count_y, low_evidence_run_y = [], []
-    worst_token_eu_y = []
-    quadrant_au, quadrant_eu, quadrant_is_low_evidence = [], [], []
+    action_token_count_y, low_evidence_count_y, low_evidence_ratio_y = [], [], []
+    top_eu_20pct_y = []
+    quadrant_au, quadrant_eu, quadrant_is_low_evidence, quadrant_chunk_idx = [], [], [], []
     for record in uncertainty_chunks:
         chunk_idx = int(record.get("chunk_idx", len(chunk_x)))
         action_token_au = np.asarray(
@@ -316,31 +417,36 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
             evidence_token_x.extend(xs.tolist())
             evidence_token_y.extend(clipped_evidence.tolist())
 
-        low_evidence_count = record.get("low_evidence_count")
-        if low_evidence_count is None:
+        action_token_count = int(action_token_evidence.size)
+        if action_token_count > 0:
             low_evidence_count = int(np.sum(low_evidence_mask))
-        low_evidence_max_consecutive = record.get("low_evidence_max_consecutive")
-        if low_evidence_max_consecutive is None:
-            current_run = 0
-            low_evidence_max_consecutive = 0
-            for is_low in low_evidence_mask:
-                current_run = current_run + 1 if bool(is_low) else 0
-                low_evidence_max_consecutive = max(low_evidence_max_consecutive, current_run)
+            low_evidence_ratio = float(low_evidence_count / action_token_count)
+        else:
+            action_token_count = int(record.get("num_action_tokens", 0))
+            low_evidence_count = int(record.get("low_evidence_count") or 0)
+            low_evidence_ratio = float(
+                record.get(
+                    "low_evidence_ratio",
+                    low_evidence_count / action_token_count if action_token_count > 0 else 0.0,
+                )
+            )
 
-        worst_token_eu_mean = record.get("worst_token_eu_mean")
-        if worst_token_eu_mean is None and action_token_eu.size > 0:
-            worst_token_count = min(int(record.get("worst_token_count", 3)), action_token_eu.size)
-            worst_token_eu_mean = float(np.mean(np.sort(action_token_eu)[-worst_token_count:]))
+        top_eu_20pct_mean = None
+        if action_token_eu.size > 0:
+            top_eu_count = max(1, int(math.ceil(0.2 * action_token_eu.size)))
+            top_eu_20pct_mean = float(np.mean(np.sort(action_token_eu)[-top_eu_count:]))
 
         chunk_x.append(chunk_idx)
+        action_token_count_y.append(float(action_token_count))
         low_evidence_count_y.append(float(low_evidence_count))
-        low_evidence_run_y.append(float(low_evidence_max_consecutive))
-        worst_token_eu_y.append(float(worst_token_eu_mean) if worst_token_eu_mean is not None else np.nan)
+        low_evidence_ratio_y.append(low_evidence_ratio)
+        top_eu_20pct_y.append(float(top_eu_20pct_mean) if top_eu_20pct_mean is not None else np.nan)
 
         num_quadrant_tokens = min(action_token_au.size, action_token_eu.size)
         if num_quadrant_tokens > 0:
             quadrant_au.extend(action_token_au[:num_quadrant_tokens].tolist())
             quadrant_eu.extend(action_token_eu[:num_quadrant_tokens].tolist())
+            quadrant_chunk_idx.extend([chunk_idx] * num_quadrant_tokens)
             if action_token_evidence.size >= num_quadrant_tokens:
                 quadrant_is_low_evidence.extend(low_evidence_mask[:num_quadrant_tokens].tolist())
             else:
@@ -398,17 +504,44 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
     axes[0, 2].grid(True, alpha=0.25)
 
     if chunk_x:
-        axes[1, 0].bar(chunk_x, low_evidence_count_y, alpha=0.45, color="tab:red", label="Low count")
-        axes[1, 0].plot(
+        axes[1, 0].bar(
             chunk_x,
-            low_evidence_run_y,
+            action_token_count_y,
+            alpha=0.35,
+            color="gray",
+            label="Total action tokens",
+            zorder=1,
+        )
+        axes[1, 0].bar(
+            chunk_x,
+            low_evidence_count_y,
+            alpha=0.55,
+            color="tab:red",
+            label="Low-evidence tokens",
+            zorder=2,
+        )
+        ratio_axis = axes[1, 0].twinx()
+        ratio_axis.plot(
+            chunk_x,
+            low_evidence_ratio_y,
             marker="o",
             markersize=3,
             linewidth=1.2,
             color="black",
-            label="Longest consecutive run",
+            label="Low-evidence ratio",
+            zorder=3,
         )
-        axes[1, 0].legend(loc="upper right", fontsize=8)
+        ratio_axis.set_ylabel("Low-evidence ratio")
+        ratio_axis.set_ylim(0.0, 1.0)
+        ratio_axis.grid(False)
+        count_handles, count_labels = axes[1, 0].get_legend_handles_labels()
+        ratio_handles, ratio_labels = ratio_axis.get_legend_handles_labels()
+        axes[1, 0].legend(
+            count_handles + ratio_handles,
+            count_labels + ratio_labels,
+            loc="upper right",
+            fontsize=8,
+        )
     else:
         axes[1, 0].text(
             0.5, 0.5, "No low-evidence diagnostics", ha="center", va="center", transform=axes[1, 0].transAxes
@@ -418,13 +551,13 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
     axes[1, 0].set_ylabel("Token count")
     axes[1, 0].grid(True, alpha=0.25)
 
-    finite_worst_eu = np.isfinite(np.asarray(worst_token_eu_y, dtype=np.float32))
-    if chunk_x and np.any(finite_worst_eu):
+    finite_top_eu = np.isfinite(np.asarray(top_eu_20pct_y, dtype=np.float32))
+    if chunk_x and np.any(finite_top_eu):
         chunk_array = np.asarray(chunk_x, dtype=np.float32)
-        worst_eu_array = np.asarray(worst_token_eu_y, dtype=np.float32)
+        top_eu_array = np.asarray(top_eu_20pct_y, dtype=np.float32)
         axes[1, 1].plot(
-            chunk_array[finite_worst_eu],
-            worst_eu_array[finite_worst_eu],
+            chunk_array[finite_top_eu],
+            top_eu_array[finite_top_eu],
             marker="o",
             markersize=4,
             linewidth=1.5,
@@ -434,9 +567,9 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
         axes[1, 1].text(
             0.5, 0.5, "No chunk epistemic risk", ha="center", va="center", transform=axes[1, 1].transAxes
         )
-    axes[1, 1].set_title("Mean EU of worst action tokens per chunk")
+    axes[1, 1].set_title("Mean EU of top 20% action tokens per chunk")
     axes[1, 1].set_xlabel("Chunk index")
-    axes[1, 1].set_ylabel("Worst-token mean EU")
+    axes[1, 1].set_ylabel("Top-20% mean EU")
     axes[1, 1].set_ylim(0.0, 1.0)
     axes[1, 1].grid(True, alpha=0.25)
 
@@ -489,6 +622,36 @@ def _save_uncertainty_artifacts(uncertainty_chunks: list[dict], rollout_base: pa
     axes[1, 2].set_xlim(0.0, 1.0)
     axes[1, 2].set_ylim(0.0, 1.0)
     axes[1, 2].grid(True, alpha=0.25)
+
+    if quadrant_au:
+        quadrant_chunk_idx_array = np.asarray(quadrant_chunk_idx, dtype=np.float32)
+        max_chunk_idx = max(math.ceil(max_steps / action_chunk_size) - 1, 1)
+        chunk_norm = matplotlib.colors.Normalize(vmin=0, vmax=max_chunk_idx)
+        chunk_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+            "chunk_blues",
+            plt.get_cmap("Blues")(np.linspace(0.25, 1.0, 256)),
+        )
+        temporal_scatter = axes[1, 3].scatter(
+            quadrant_au_array,
+            quadrant_eu_array,
+            c=quadrant_chunk_idx_array,
+            cmap=chunk_cmap,
+            norm=chunk_norm,
+            s=14,
+            alpha=0.75,
+        )
+        colorbar = fig.colorbar(temporal_scatter, ax=axes[1, 3])
+        colorbar.set_label("Chunk index")
+    else:
+        axes[1, 3].text(
+            0.5, 0.5, "No AU-EU temporal data", ha="center", va="center", transform=axes[1, 3].transAxes
+        )
+    axes[1, 3].set_title("Action-token AU-EU by chunk time")
+    axes[1, 3].set_xlabel("Normalized AU")
+    axes[1, 3].set_ylabel("EU")
+    axes[1, 3].set_xlim(0.0, 1.0)
+    axes[1, 3].set_ylim(0.0, 1.0)
+    axes[1, 3].grid(True, alpha=0.25)
 
     fig.tight_layout()
     fig.savefig(png_path, dpi=160)

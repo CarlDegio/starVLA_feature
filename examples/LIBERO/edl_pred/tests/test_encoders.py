@@ -91,6 +91,35 @@ class EncoderTest(unittest.TestCase):
             if output.pooling_weights is not None:
                 self.assertTrue(torch.all(output.pooling_weights[0, 2] == 0))
 
+    def test_all_false_batch_returns_exact_zeros_without_attention_calls(self) -> None:
+        token_mask = torch.zeros_like(self.token_mask)
+        for name in ENCODER_NAMES:
+            encoder = build_test_encoder(name)
+            calls: list[str] = []
+            handles = []
+            if name != "mlp_flat":
+                handles.append(
+                    encoder.pool.attention.register_forward_hook(
+                        lambda *_: calls.append("pool"),
+                    )
+                )
+            if name == "token_self_attention":
+                handles.append(
+                    encoder.self_attention.register_forward_hook(
+                        lambda *_: calls.append("self_attention"),
+                    )
+                )
+            try:
+                output = encoder(self.features, token_mask)
+            finally:
+                for handle in handles:
+                    handle.remove()
+
+            self.assertTrue(torch.all(output.embedding == 0))
+            if output.pooling_weights is not None:
+                self.assertTrue(torch.all(output.pooling_weights == 0))
+            self.assertEqual(calls, [])
+
     def test_all_position_modes_are_accepted_by_attention_encoder(self) -> None:
         for position in POSITION_NAMES:
             output = build_test_encoder("token_attention_pool", position=position)(
@@ -132,6 +161,25 @@ class EncoderTest(unittest.TestCase):
         self.assertFalse(torch.equal(build_token_position("sinusoidal", 5, 8)(tokens), tokens))
         torch.manual_seed(17)
         self.assertFalse(torch.equal(build_token_position("learned", 5, 8)(tokens), tokens))
+
+    def test_position_modules_preserve_low_precision_dtype_with_odd_dimension(self) -> None:
+        for kind in ("sinusoidal", "learned"):
+            for dtype in (torch.float16, torch.bfloat16):
+                with self.subTest(kind=kind, dtype=dtype):
+                    position = build_token_position(kind, max_tokens=5, dim=7).to("cpu")
+                    tokens = torch.zeros(2, 5, 7, dtype=dtype)
+                    output = position(tokens)
+                    self.assertEqual(position.max_tokens, 5)
+                    self.assertEqual(output.shape, tokens.shape)
+                    self.assertEqual(output.dtype, dtype)
+                    self.assertEqual(output.device, tokens.device)
+
+    def test_position_modules_reject_token_sequences_longer_than_maximum(self) -> None:
+        for kind in ("sinusoidal", "learned"):
+            with self.subTest(kind=kind):
+                position = build_token_position(kind, max_tokens=5, dim=7)
+                with self.assertRaisesRegex(ValueError, "max_tokens=5"):
+                    position(torch.zeros(2, 6, 7))
 
 
 if __name__ == "__main__":

@@ -233,6 +233,8 @@ wandb/*
 **/*.mp4
 **/*.npy
 **/*.parquet
+examples/LIBERO/eval_files/datasets/*.hdf5
+/examples/LIBERO/edl_pred/outputs/
 
 */**/*.md
 */*.md

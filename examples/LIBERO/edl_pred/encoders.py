@@ -28,6 +28,7 @@ class _IdentityTokenPosition(nn.Module):
 class SinusoidalTokenPosition(nn.Module):
     def __init__(self, max_tokens: int, dim: int) -> None:
         super().__init__()
+        self.max_tokens = max_tokens
         position = torch.arange(max_tokens, dtype=torch.float32).unsqueeze(1)
         frequencies = torch.exp(
             torch.arange(0, dim, 2, dtype=torch.float32) * (-math.log(10000.0) / dim)
@@ -38,17 +39,28 @@ class SinusoidalTokenPosition(nn.Module):
         self.register_buffer("values", values, persistent=False)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        return tokens + self.values[: tokens.shape[-2]]
+        token_count = tokens.shape[-2]
+        if token_count > self.max_tokens:
+            raise ValueError(
+                f"token sequence length {token_count} exceeds max_tokens={self.max_tokens}"
+            )
+        return tokens + self.values[:token_count].to(dtype=tokens.dtype)
 
 
 class LearnedTokenPosition(nn.Module):
     def __init__(self, max_tokens: int, dim: int) -> None:
         super().__init__()
+        self.max_tokens = max_tokens
         self.embedding = nn.Embedding(max_tokens, dim)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        positions = torch.arange(tokens.shape[-2], device=tokens.device)
-        return tokens + self.embedding(positions)
+        token_count = tokens.shape[-2]
+        if token_count > self.max_tokens:
+            raise ValueError(
+                f"token sequence length {token_count} exceeds max_tokens={self.max_tokens}"
+            )
+        positions = torch.arange(token_count, device=tokens.device)
+        return tokens + self.embedding(positions).to(dtype=tokens.dtype)
 
 
 def build_token_position(kind: str, max_tokens: int, dim: int) -> nn.Module:
@@ -133,6 +145,24 @@ class _MaskedChunkEncoder(nn.Module):
         flattened[valid_rows] = encoded
         return flattened.reshape(batch_size, chunk_count, self.chunk_embed_dim)
 
+    def _zero_output(
+        self,
+        features: torch.Tensor,
+        batch_size: int,
+        chunk_count: int,
+        token_count: int,
+        *,
+        has_pooling_weights: bool,
+    ) -> ChunkEncoderOutput:
+        return ChunkEncoderOutput(
+            embedding=features.new_zeros((batch_size, chunk_count, self.chunk_embed_dim)),
+            pooling_weights=(
+                features.new_zeros((batch_size, chunk_count, token_count))
+                if has_pooling_weights
+                else None
+            ),
+        )
+
     @staticmethod
     def _scatter_weights(
         weights: torch.Tensor,
@@ -159,7 +189,15 @@ class MLPFlatEncoder(_MaskedChunkEncoder):
         )
 
     def forward(self, features: torch.Tensor, token_mask: torch.Tensor) -> ChunkEncoderOutput:
-        flat_features, _, valid_rows, batch_size, chunk_count, _ = self._prepare(features, token_mask)
+        flat_features, _, valid_rows, batch_size, chunk_count, token_count = self._prepare(features, token_mask)
+        if not valid_rows.any():
+            return self._zero_output(
+                flat_features,
+                batch_size,
+                chunk_count,
+                token_count,
+                has_pooling_weights=False,
+            )
         embedding = self._scatter_embeddings(
             self.network(flat_features[valid_rows].flatten(start_dim=1)),
             valid_rows,
@@ -193,6 +231,14 @@ class TokenAttentionPoolEncoder(_MaskedChunkEncoder):
 
     def forward(self, features: torch.Tensor, token_mask: torch.Tensor) -> ChunkEncoderOutput:
         flat_features, flat_mask, valid_rows, batch_size, chunk_count, token_count = self._prepare(features, token_mask)
+        if not valid_rows.any():
+            return self._zero_output(
+                flat_features,
+                batch_size,
+                chunk_count,
+                token_count,
+                has_pooling_weights=True,
+            )
         pooled, weights = self._encode_valid_rows(flat_features[valid_rows], flat_mask[valid_rows])
         embedding = self._scatter_embeddings(
             self.output_projection(pooled),

@@ -1,0 +1,51 @@
+run:
+  name: edl_verifier_attention_pool
+  output_root: ../outputs
+  seed: 7
+  overwrite: false
+
+data:
+  datasets:
+    libero_spatial: ../../eval_files/datasets/qwen3fast_libero_all_edl_1e-2_steps_30000_pytorch_model_libero_spatial.hdf5
+    libero_object: ../../eval_files/datasets/qwen3fast_libero_all_edl_1e-2_steps_30000_pytorch_model_libero_object.hdf5
+    libero_goal: ../../eval_files/datasets/qwen3fast_libero_all_edl_1e-2_steps_30000_pytorch_model_libero_goal.hdf5
+    libero_10: ../../eval_files/datasets/qwen3fast_libero_all_edl_1e-2_steps_30000_pytorch_model_libero_10.hdf5
+  selected_suites:
+    - libero_spatial
+    - libero_object
+    - libero_goal
+    - libero_10
+  validation_ratio: 0.1
+  split_seed: 7
+  max_action_tokens: auto
+
+model:
+  chunk_encoder: token_attention_pool
+  token_position_encoding: sinusoidal
+  token_embed_dim: 32
+  chunk_embed_dim: 64
+  attention_heads: 1
+  self_attention_layers: 1
+  encoder_dropout: 0.1
+  lstm_hidden_dim: 64
+  lstm_layers: 1
+  lstm_dropout: 0.0
+  head: edl
+
+edl:
+  evidence_activation: softplus
+  kl_weight: 0.001
+  kl_anneal_epochs: 20
+
+loss:
+  class_balance: none
+
+training:
+  device: auto
+  epochs: 200
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 30
+  num_workers: 0
