@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 import h5py
 import numpy as np
@@ -131,6 +131,89 @@ def sha256_file(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
         while block := handle.read(chunk_size):
             digest.update(block)
     return digest.hexdigest()
+
+
+def collect_dataset_provenance(
+    datasets: Mapping[str, str | Path],
+    *,
+    require_collection_identity: bool,
+) -> dict[str, dict[str, Any]]:
+    """Read immutable identities from a suite-indexed collector dataset bundle."""
+    if not datasets:
+        raise ValueError("datasets must not be empty")
+    result: dict[str, dict[str, Any]] = {}
+    for suite, raw_path in sorted(datasets.items()):
+        if not isinstance(suite, str) or not suite:
+            raise ValueError("dataset suite names must be non-empty strings")
+        path = Path(raw_path).expanduser().resolve()
+        with h5py.File(path, "r") as handle:
+            task_suite = _attribute_string(handle.attrs.get("task_suite"))
+            collection_id = _attribute_string(handle.attrs.get("collection_id"))
+            seed_namespace = _attribute_string(handle.attrs.get("seed_namespace"))
+            raw_seed = handle.attrs.get("seed")
+        if task_suite is not None and task_suite != suite:
+            raise ValueError(f"dataset suite metadata mismatch: expected {suite!r}, found {task_suite!r}")
+        if require_collection_identity and (not collection_id or not seed_namespace):
+            raise ValueError(
+                f"independent test dataset {path} requires non-empty collection_id and seed_namespace"
+            )
+        result[suite] = {
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "task_suite": task_suite,
+            "collection_id": collection_id,
+            "seed_namespace": seed_namespace,
+            "seed": None if raw_seed is None else int(raw_seed),
+        }
+    if require_collection_identity:
+        collection_ids = {item["collection_id"] for item in result.values()}
+        namespaces = {item["seed_namespace"] for item in result.values()}
+        if len(collection_ids) != 1:
+            raise ValueError("all independent test suites must share one collection_id")
+        if len(namespaces) != 1:
+            raise ValueError("all independent test suites must share one seed_namespace")
+    return result
+
+
+def validate_independent_test_datasets(
+    test_datasets: Mapping[str, Mapping[str, Any]],
+    calibration_datasets: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Reject reused source files or collection namespaces before test inference."""
+    if calibration_datasets and set(test_datasets) != set(calibration_datasets):
+        raise ValueError("test and calibration dataset suites differ")
+    calibration_paths = {str(item.get("path")) for item in calibration_datasets.values()}
+    calibration_hashes = {str(item.get("sha256")) for item in calibration_datasets.values()}
+    calibration_ids = {
+        str(item["collection_id"])
+        for item in calibration_datasets.values()
+        if item.get("collection_id")
+    }
+    calibration_namespaces = {
+        str(item["seed_namespace"])
+        for item in calibration_datasets.values()
+        if item.get("seed_namespace")
+    }
+    for suite, item in test_datasets.items():
+        if not item.get("collection_id") or not item.get("seed_namespace"):
+            raise ValueError(f"test dataset {suite!r} lacks collection identity")
+        conflicts = (
+            str(item.get("path")) in calibration_paths
+            or str(item.get("sha256")) in calibration_hashes
+            or str(item.get("collection_id")) in calibration_ids
+            or str(item.get("seed_namespace")) in calibration_namespaces
+        )
+        if conflicts:
+            raise ValueError(f"test dataset {suite!r} is not independent from calibration data")
+
+
+def _attribute_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    text = str(value).strip()
+    return text or None
 
 
 def _read_episode_prediction(

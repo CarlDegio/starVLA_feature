@@ -4,14 +4,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from examples.LIBERO.edl_pred.artifacts import PredictionRecord, write_validation_predictions
 from examples.LIBERO.edl_pred.dataset import EpisodeRef
 from examples.LIBERO.edl_pred.rejection_data import (
     build_calibration_records,
+    collect_dataset_provenance,
     read_prediction_file,
     sha256_file,
+    validate_independent_test_datasets,
     validate_matched_predictions,
 )
 
@@ -77,6 +80,70 @@ class RejectionDataTest(unittest.TestCase):
                 read_prediction_file(left_path, expected_head="edl"),
                 read_prediction_file(right_path, expected_head="edl"),
             )
+
+    def test_independent_dataset_validation_records_and_checks_collection_identity(self) -> None:
+        datasets = {}
+        for suite in ("libero_goal", "libero_spatial"):
+            path = self.root / f"test_{suite}.hdf5"
+            with h5py.File(path, "w") as handle:
+                handle.attrs["task_suite"] = suite
+                handle.attrs["collection_id"] = "rejection_test_v1"
+                handle.attrs["seed_namespace"] = "heldout_seed17"
+                handle.attrs["seed"] = 17
+            datasets[suite] = path
+
+        provenance = collect_dataset_provenance(datasets, require_collection_identity=True)
+        validate_independent_test_datasets(
+            provenance,
+            {
+                "libero_goal": {
+                    "path": str(self.root / "calibration_goal.hdf5"),
+                    "sha256": "0" * 64,
+                    "collection_id": None,
+                    "seed_namespace": None,
+                },
+                "libero_spatial": {
+                    "path": str(self.root / "calibration_spatial.hdf5"),
+                    "sha256": "1" * 64,
+                    "collection_id": None,
+                    "seed_namespace": None,
+                },
+            },
+        )
+        self.assertEqual(provenance["libero_goal"]["collection_id"], "rejection_test_v1")
+
+        duplicated = {suite: dict(value) for suite, value in provenance.items()}
+        duplicated["libero_goal"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "not independent"):
+            validate_independent_test_datasets(
+                duplicated,
+                {
+                    "libero_goal": {
+                        "path": str(self.root / "calibration_goal.hdf5"),
+                        "sha256": "0" * 64,
+                        "collection_id": None,
+                        "seed_namespace": None,
+                    },
+                    "libero_spatial": {
+                        "path": str(self.root / "calibration_spatial.hdf5"),
+                        "sha256": "1" * 64,
+                        "collection_id": None,
+                        "seed_namespace": None,
+                    },
+                },
+            )
+
+    def test_collection_provenance_requires_shared_nonempty_namespace(self) -> None:
+        datasets = {}
+        for index, suite in enumerate(("libero_goal", "libero_spatial")):
+            path = self.root / f"bad_{suite}.hdf5"
+            with h5py.File(path, "w") as handle:
+                handle.attrs["task_suite"] = suite
+                handle.attrs["collection_id"] = "test_v1"
+                handle.attrs["seed_namespace"] = f"namespace_{index}"
+            datasets[suite] = path
+        with self.assertRaisesRegex(ValueError, "seed_namespace"):
+            collect_dataset_provenance(datasets, require_collection_identity=True)
 
 
 if __name__ == "__main__":

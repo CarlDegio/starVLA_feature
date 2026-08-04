@@ -10,6 +10,9 @@ PORT="${PORT:-6694}"
 TASK_SUITE_NAME="${TASK_SUITE_NAME:-libero_goal}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-50}"
 MAX_TASKS="${MAX_TASKS:--1}"
+SEED="${SEED:-17}"
+COLLECTION_ID="${COLLECTION_ID:-rejection_test_seed${SEED}}"
+SEED_NAMESPACE="${SEED_NAMESPACE:-heldout_rejection_test_seed${SEED}}"
 OVERWRITE="${OVERWRITE:-0}"
 RESUME="${RESUME:-0}"
 MUJOCO_GL_VALUE="${MUJOCO_GL_VALUE:-egl}"
@@ -22,6 +25,14 @@ if [[ -z "${LIBERO_HOME}" ]]; then
 fi
 if [[ "${OVERWRITE}" == "1" && "${RESUME}" == "1" ]]; then
   echo "OVERWRITE=1 and RESUME=1 cannot be used together."
+  exit 1
+fi
+if [[ ! "${COLLECTION_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "COLLECTION_ID must contain only letters, digits, '.', '_', or '-'."
+  exit 1
+fi
+if [[ ! "${SEED_NAMESPACE}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "SEED_NAMESPACE must contain only letters, digits, '.', '_', or '-'."
   exit 1
 fi
 
@@ -37,7 +48,7 @@ RUN_ID="$(basename "${MODEL_ROOT}")"
 CKPT_FILENAME="$(basename "${CKPT}")"
 CKPT_STEM="${CKPT_FILENAME%.pt}"
 DATASET_DIR="${DATASET_DIR:-${STARVLA_DIR}/examples/LIBERO/eval_files/datasets}"
-DATASET_OUTPUT_PATH="${DATASET_OUTPUT_PATH:-${DATASET_DIR}/${RUN_ID}_${CKPT_STEM}_${TASK_SUITE_NAME}.hdf5}"
+DATASET_OUTPUT_PATH="${DATASET_OUTPUT_PATH:-${DATASET_DIR}/${RUN_ID}_${CKPT_STEM}_${COLLECTION_ID}_${TASK_SUITE_NAME}.hdf5}"
 
 EXTRA_ARGS=()
 if [[ "${OVERWRITE}" == "1" ]]; then
@@ -56,6 +67,9 @@ echo "Collecting ${TASK_SUITE_NAME} uncertainty data into ${DATASET_OUTPUT_PATH}
   --args.task-suite-name "${TASK_SUITE_NAME}" \
   --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
   --args.max-tasks "${MAX_TASKS}" \
+  --args.seed "${SEED}" \
+  --args.collection-id "${COLLECTION_ID}" \
+  --args.seed-namespace "${SEED_NAMESPACE}" \
   --args.dataset-output-path "${DATASET_OUTPUT_PATH}" \
   --args.no-save-artifacts \
   "${EXTRA_ARGS[@]}"

@@ -24,6 +24,13 @@ class LiberoClientScriptTest(unittest.TestCase):
             f"Suite invocation bypasses RUN_MODE selection: {suite_invocations}",
         )
 
+    def test_collection_script_passes_independent_collection_metadata(self):
+        script = (REPO_ROOT / "examples/LIBERO/eval_files/collect_libero_dataset.sh").read_text()
+        self.assertIn('--args.collection-id "${COLLECTION_ID}"', script)
+        self.assertIn('--args.seed-namespace "${SEED_NAMESPACE}"', script)
+        self.assertIn('--args.seed "${SEED}"', script)
+        self.assertIn('${CKPT_STEM}_${COLLECTION_ID}_${TASK_SUITE_NAME}.hdf5', script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,6 +56,21 @@ class PolicyThresholds:
                 result[name] = _serialize_threshold(value)
         return result
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PolicyThresholds":
+        """Restore thresholds from the strict JSON representation."""
+        if not isinstance(payload, Mapping):
+            raise ValueError("policy thresholds must be a mapping")
+        allowed = {"kind", "tau_au", "tau_eu", "tau_entropy"}
+        if "kind" not in payload or set(payload) - allowed:
+            raise ValueError("policy thresholds contain missing or unknown fields")
+        values = {
+            name: _deserialize_threshold(payload[name])
+            for name in ("tau_au", "tau_eu", "tau_entropy")
+            if name in payload
+        }
+        return cls(kind=payload["kind"], **values)
+
 
 @dataclass(frozen=True)
 class RejectionResult:
@@ -444,6 +459,16 @@ def _serialize_threshold(value: float) -> str | float:
     if value == -np.inf:
         return "-inf"
     return value
+
+
+def _deserialize_threshold(value: Any) -> float:
+    if value == "+inf":
+        return np.inf
+    if value == "-inf":
+        return -np.inf
+    if isinstance(value, str):
+        raise ValueError(f"unknown threshold sentinel: {value!r}")
+    return _threshold(value, "threshold")
 
 
 def _unit_interval(value: Any, name: str) -> float:

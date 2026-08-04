@@ -57,6 +57,8 @@ class Args:
     dataset_output_path: str | None = None
     dataset_overwrite: bool = False
     dataset_resume: bool = False
+    collection_id: str | None = None
+    seed_namespace: str | None = None
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -310,6 +312,10 @@ def _create_dataset_writer(args: Args, client_model: ModelClient, max_steps: int
         return None
     if not args.pretrained_path:
         raise ValueError("pretrained_path is required for dataset provenance")
+    collection_id = "" if args.collection_id is None else args.collection_id.strip()
+    seed_namespace = "" if args.seed_namespace is None else args.seed_namespace.strip()
+    if not collection_id or not seed_namespace:
+        raise ValueError("collection_id and seed_namespace are required for dataset collection")
 
     server_metadata = client_model.server_metadata
     server_checkpoint = server_metadata.get("ckpt_path")
@@ -331,6 +337,8 @@ def _create_dataset_writer(args: Args, client_model: ModelClient, max_steps: int
         "checkpoint_path": str(requested_checkpoint),
         "server_checkpoint_path": str(actual_checkpoint),
         "task_suite": args.task_suite_name,
+        "collection_id": collection_id,
+        "seed_namespace": seed_namespace,
         "seed": args.seed,
         "max_steps": max_steps,
         "action_chunk_size": client_model.action_chunk_size,

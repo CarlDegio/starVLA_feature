@@ -45,6 +45,11 @@ class RejectionPolicyTest(unittest.TestCase):
         )
         self.assertTrue(result.accepted[0])
 
+    def test_thresholds_round_trip_json_boundary_sentinels(self) -> None:
+        original = PolicyThresholds("au_or_eu", tau_au=np.inf, tau_eu=0.5)
+        restored = PolicyThresholds.from_dict(original.to_dict())
+        self.assertEqual(restored, original)
+
     def test_default_calibration_maximizes_coverage_under_risk_constraint(self) -> None:
         episode_ids = np.repeat([f"episode_{index}" for index in range(10)], 10)
         episode_labels = np.array([1, 1, 0, 0, 1, 0, 1, 0, 1, 0])

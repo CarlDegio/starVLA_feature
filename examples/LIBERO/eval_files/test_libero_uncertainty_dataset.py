@@ -17,6 +17,8 @@ class LiberoUncertaintyDatasetWriterTest(unittest.TestCase):
             "checkpoint_path": "/checkpoints/model.pt",
             "server_checkpoint_path": "/checkpoints/model.pt",
             "task_suite": "libero_spatial",
+            "collection_id": "rejection_test_v1",
+            "seed_namespace": "heldout_seed17",
             "seed": 7,
             "max_steps": 220,
             "action_chunk_size": 8,
@@ -71,6 +73,8 @@ class LiberoUncertaintyDatasetWriterTest(unittest.TestCase):
         with h5py.File(self.dataset_path, "r") as dataset:
             self.assertEqual(dataset.attrs["schema_version"], "1.0")
             self.assertEqual(dataset.attrs["task_suite"], "libero_spatial")
+            self.assertEqual(dataset.attrs["collection_id"], "rejection_test_v1")
+            self.assertEqual(dataset.attrs["seed_namespace"], "heldout_seed17")
             episode = dataset["episodes/task_002_episode_0003"]
             self.assertEqual(int(episode.attrs["success"]), 1)
             self.assertEqual(episode.attrs["task_description"], "pick up the bowl")

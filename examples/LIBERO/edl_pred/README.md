@@ -125,3 +125,63 @@ accepted as summary destinations. A summary-directory reservation is held while
 all three files are staged and published; a publication failure restores the
 previous generation (or leaves all three absent for the default no-overwrite
 mode).
+
+## Frozen Selective Rejection
+
+The rejection analysis does not retrain a verifier. It uses absolute chunks
+1 through 10 from each run's existing `validation_predictions.hdf5` to freeze
+one global threshold for each applicable policy:
+
+- EDL AU: accept when `AU <= tau_au`;
+- EDL AU-or-EU: accept when both `AU <= tau_au` and `EU <= tau_eu`;
+- EDL and softmax predictive entropy: accept when entropy is below its frozen
+  threshold.
+
+The default point maximizes calibration coverage subject to selective error
+at most 20%, at least 10% coverage, and at least ten accepted episodes. Points
+targeting 25%, 50%, 75%, and 90% coverage are also frozen for diagnostics.
+
+Calibrate the completed sweep once:
+
+```bash
+conda run -n starvla python -m examples.LIBERO.edl_pred.calibrate_rejection \
+  --sweep-root examples/LIBERO/edl_pred/outputs/sweeps/all_suites_seed7_v1 \
+  --output examples/LIBERO/edl_pred/outputs/sweeps/all_suites_seed7_v1/rejection/rejection_calibration.json
+```
+
+Collect a new rollout set with a collection identity and seed namespace that
+were not used by the verifier source data. Use the same values for every suite
+in one collection. For example, with `policy_server.zsh` already running:
+
+```bash
+COLLECTION_ID=rejection_test_v1 \
+SEED_NAMESPACE=heldout_rejection_test_v1 \
+SEED=17 \
+RUN_MODE=collect \
+./libero_client.zsh
+```
+
+The collector defaults to seed 17 and writes `collection_id`,
+`seed_namespace`, suite, checkpoint, seed, action chunk size, and server
+metadata into each HDF5 root. The evaluator rejects missing identities,
+mismatched suite bundles, and any test file whose path, content hash,
+collection ID, or seed namespace overlaps the calibration source data.
+
+Run frozen inference and rejection analysis on the independent HDF5 files:
+
+```bash
+conda run -n starvla python -m examples.LIBERO.edl_pred.evaluate_rejection \
+  --calibration examples/LIBERO/edl_pred/outputs/sweeps/all_suites_seed7_v1/rejection/rejection_calibration.json \
+  --dataset libero_spatial=/path/to/test_libero_spatial.hdf5 \
+  --dataset libero_object=/path/to/test_libero_object.hdf5 \
+  --dataset libero_goal=/path/to/test_libero_goal.hdf5 \
+  --dataset libero_10=/path/to/test_libero_10.hdf5 \
+  --output-dir examples/LIBERO/edl_pred/outputs/rejection_test_v1
+```
+
+The output contains strict JSON and CSV metrics, raw and rejected per-chunk
+HDF5 predictions, risk-coverage and fixed-chunk plots, suite-level support,
+and paired episode-bootstrap comparisons between matched EDL AU and softmax
+entropy. `UNDETERMINED` chunks count against coverage but are excluded from
+conditional selective accuracy. Chunks after 10 are retained with explicit
+incomplete-support counts and are diagnostic rather than primary.
