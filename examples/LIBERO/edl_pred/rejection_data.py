@@ -151,6 +151,7 @@ def collect_dataset_provenance(
             collection_id = _attribute_string(handle.attrs.get("collection_id"))
             seed_namespace = _attribute_string(handle.attrs.get("seed_namespace"))
             raw_seed = handle.attrs.get("seed")
+            task_episode_ids = _task_episode_identities(handle)
         if task_suite is not None and task_suite != suite:
             raise ValueError(f"dataset suite metadata mismatch: expected {suite!r}, found {task_suite!r}")
         if require_collection_identity and (not collection_id or not seed_namespace):
@@ -164,6 +165,7 @@ def collect_dataset_provenance(
             "collection_id": collection_id,
             "seed_namespace": seed_namespace,
             "seed": None if raw_seed is None else int(raw_seed),
+            "task_episode_ids": task_episode_ids,
         }
     if require_collection_identity:
         collection_ids = {item["collection_id"] for item in result.values()}
@@ -205,6 +207,14 @@ def validate_independent_test_datasets(
         )
         if conflicts:
             raise ValueError(f"test dataset {suite!r} is not independent from calibration data")
+        calibration_item = calibration_datasets.get(suite, {})
+        calibration_episode_ids = set(calibration_item.get("task_episode_ids", ()))
+        overlap = calibration_episode_ids.intersection(item.get("task_episode_ids", ()))
+        if overlap:
+            first = sorted(overlap)[0]
+            raise ValueError(
+                f"test dataset {suite!r} reuses calibration task/initial-state identity {first}"
+            )
 
 
 def _attribute_string(value: Any) -> str | None:
@@ -214,6 +224,24 @@ def _attribute_string(value: Any) -> str | None:
         value = value.decode("utf-8")
     text = str(value).strip()
     return text or None
+
+
+def _task_episode_identities(handle: h5py.File) -> list[str]:
+    if "episodes" not in handle:
+        return []
+    identities: list[str] = []
+    for key in handle["episodes"]:
+        group = handle["episodes"][key]
+        if not isinstance(group, h5py.Group):
+            continue
+        task_id = group.attrs.get("task_id")
+        episode_idx = group.attrs.get("episode_idx")
+        if task_id is None or episode_idx is None:
+            raise ValueError(f"collector episode {key!r} lacks task_id or episode_idx")
+        identities.append(f"{int(task_id)}:{int(episode_idx)}")
+    if len(set(identities)) != len(identities):
+        raise ValueError("collector dataset contains duplicate task/episode identities")
+    return sorted(identities)
 
 
 def _read_episode_prediction(

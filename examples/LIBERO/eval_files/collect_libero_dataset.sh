@@ -9,6 +9,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-6694}"
 TASK_SUITE_NAME="${TASK_SUITE_NAME:-libero_goal}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-50}"
+EPISODE_START_INDEX="${EPISODE_START_INDEX:-0}"
 MAX_TASKS="${MAX_TASKS:--1}"
 SEED="${SEED:-17}"
 COLLECTION_ID="${COLLECTION_ID:-rejection_test_seed${SEED}}"
@@ -33,6 +34,10 @@ if [[ ! "${COLLECTION_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
 fi
 if [[ ! "${SEED_NAMESPACE}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "SEED_NAMESPACE must contain only letters, digits, '.', '_', or '-'."
+  exit 1
+fi
+if [[ ! "${EPISODE_START_INDEX}" =~ ^[0-9]+$ ]]; then
+  echo "EPISODE_START_INDEX must be a non-negative integer."
   exit 1
 fi
 
@@ -66,6 +71,7 @@ echo "Collecting ${TASK_SUITE_NAME} uncertainty data into ${DATASET_OUTPUT_PATH}
   --args.port "${PORT}" \
   --args.task-suite-name "${TASK_SUITE_NAME}" \
   --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
+  --args.episode-start-index "${EPISODE_START_INDEX}" \
   --args.max-tasks "${MAX_TASKS}" \
   --args.seed "${SEED}" \
   --args.collection-id "${COLLECTION_ID}" \

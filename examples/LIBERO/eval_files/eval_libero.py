@@ -47,6 +47,7 @@ class Args:
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
+    episode_start_index: int = 0  # First LIBERO task-init-state index to evaluate
     max_tasks: int = -1  # If > 0, limit the number of tasks evaluated (smoke / quick check). -1 = run all.
 
     #################################################################################################################
@@ -79,6 +80,10 @@ def eval_libero(args: Args) -> None:
         raise ValueError("dataset_output_path is required when save_artifacts is disabled")
     if (args.dataset_overwrite or args.dataset_resume) and args.dataset_output_path is None:
         raise ValueError("dataset overwrite/resume requires dataset_output_path")
+    if args.num_trials_per_task <= 0:
+        raise ValueError("num_trials_per_task must be positive")
+    if args.episode_start_index < 0:
+        raise ValueError("episode_start_index must be non-negative")
 
     # Set random seed
     np.random.seed(args.seed)
@@ -128,13 +133,19 @@ def eval_libero(args: Args) -> None:
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
+        episode_stop_index = args.episode_start_index + args.num_trials_per_task
+        if episode_stop_index > len(initial_states):
+            raise ValueError(
+                f"task {task_id} has {len(initial_states)} initial states, but requested "
+                f"indices [{args.episode_start_index}, {episode_stop_index})"
+            )
 
         # Initialize LIBERO environment and task description
         env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
-        for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
+        for episode_idx in tqdm.tqdm(range(args.episode_start_index, episode_stop_index)):
             if dataset_writer is not None and dataset_writer.has_episode(task_id, episode_idx):
                 logging.info(
                     "Skipping collected episode task_id=%d episode_idx=%d",
@@ -340,6 +351,8 @@ def _create_dataset_writer(args: Args, client_model: ModelClient, max_steps: int
         "collection_id": collection_id,
         "seed_namespace": seed_namespace,
         "seed": args.seed,
+        "episode_start_index": args.episode_start_index,
+        "episode_stop_index_exclusive": args.episode_start_index + args.num_trials_per_task,
         "max_steps": max_steps,
         "action_chunk_size": client_model.action_chunk_size,
         "server_metadata": server_metadata,

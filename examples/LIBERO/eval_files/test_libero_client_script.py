@@ -29,6 +29,7 @@ class LiberoClientScriptTest(unittest.TestCase):
         self.assertIn('--args.collection-id "${COLLECTION_ID}"', script)
         self.assertIn('--args.seed-namespace "${SEED_NAMESPACE}"', script)
         self.assertIn('--args.seed "${SEED}"', script)
+        self.assertIn('--args.episode-start-index "${EPISODE_START_INDEX}"', script)
         self.assertIn('${CKPT_STEM}_${COLLECTION_ID}_${TASK_SUITE_NAME}.hdf5', script)
 
 

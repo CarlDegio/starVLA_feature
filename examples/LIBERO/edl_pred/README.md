@@ -150,16 +150,24 @@ conda run -n starvla python -m examples.LIBERO.edl_pred.calibrate_rejection \
 ```
 
 Collect a new rollout set with a collection identity and seed namespace that
-were not used by the verifier source data. Use the same values for every suite
-in one collection. For example, with `policy_server.zsh` already running:
+were not used by the verifier source data. The dedicated script collects 100
+episodes from each of the four suites by default (10 tasks times 10 trials),
+uses one identity across the bundle, and disables videos and normal evaluation
+artifacts. It starts from LIBERO init-state index 10, while the verifier source
+data uses indices 0 through 9. With `policy_server.zsh` already running:
 
 ```bash
 COLLECTION_ID=rejection_test_v1 \
 SEED_NAMESPACE=heldout_rejection_test_v1 \
 SEED=17 \
-RUN_MODE=collect \
-./libero_client.zsh
+bash examples/LIBERO/edl_pred/collect_rejection_test.sh
 ```
+
+Files are written under
+`examples/LIBERO/edl_pred/datasets/<collection_id>/`. An interrupted bundle can
+be continued with the same identity and `RESUME=1`; existing files are never
+overwritten by default. `EPISODES_PER_SUITE` is configurable but must be
+divisible by the ten LIBERO tasks.
 
 The collector defaults to seed 17 and writes `collection_id`,
 `seed_namespace`, suite, checkpoint, seed, action chunk size, and server

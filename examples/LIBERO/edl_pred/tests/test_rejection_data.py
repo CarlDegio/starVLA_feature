@@ -145,6 +145,28 @@ class RejectionDataTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "seed_namespace"):
             collect_dataset_provenance(datasets, require_collection_identity=True)
 
+    def test_independent_validation_rejects_reused_task_init_state(self) -> None:
+        test = {
+            "libero_goal": {
+                "path": str(self.root / "test.hdf5"),
+                "sha256": "a" * 64,
+                "collection_id": "test_v1",
+                "seed_namespace": "heldout_v1",
+                "task_episode_ids": ["0:10", "0:11"],
+            }
+        }
+        calibration = {
+            "libero_goal": {
+                "path": str(self.root / "source.hdf5"),
+                "sha256": "b" * 64,
+                "collection_id": None,
+                "seed_namespace": None,
+                "task_episode_ids": ["0:0", "0:10"],
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "initial-state identity 0:10"):
+            validate_independent_test_datasets(test, calibration)
+
 
 if __name__ == "__main__":
     unittest.main()
