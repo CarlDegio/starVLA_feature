@@ -465,13 +465,49 @@ def _paired_edl_softmax_comparison(
     primary_indices = np.flatnonzero(primary)
     coverage_difference, error_difference, aurc_difference = statistics(primary_indices)
     episode_ids = np.unique(edl.episode_id[primary])
-    by_episode = {episode: np.flatnonzero(primary & (edl.episode_id == episode)) for episode in episode_ids}
+    episode_codes = np.searchsorted(episode_ids, edl.episode_id[primary_indices])
     rng = np.random.default_rng(seed)
-    bootstrap_values: list[tuple[float | None, float | None, float]] = []
-    for _ in range(replicates):
-        sampled = rng.choice(episode_ids, size=episode_ids.size, replace=True)
-        indices = np.concatenate([by_episode[str(episode)] for episode in sampled])
-        bootstrap_values.append(statistics(indices))
+    draws = rng.integers(0, episode_ids.size, size=(replicates, episode_ids.size))
+    bootstrap_coverage: list[float] = []
+    bootstrap_error: list[float] = []
+    if edl_accepted is not None and softmax_accepted is not None:
+        edl_samples = _bootstrap_selective_samples(
+            edl.label[primary_indices],
+            edl.success_probability[primary_indices],
+            edl_accepted[primary_indices],
+            episode_codes,
+            draws,
+        )
+        softmax_samples = _bootstrap_selective_samples(
+            softmax.label[primary_indices],
+            softmax.success_probability[primary_indices],
+            softmax_accepted[primary_indices],
+            episode_codes,
+            draws,
+        )
+        bootstrap_coverage = (edl_samples["coverage"] - softmax_samples["coverage"]).tolist()
+        valid_error = np.isfinite(edl_samples["selective_error"]) & np.isfinite(
+            softmax_samples["selective_error"]
+        )
+        bootstrap_error = (
+            edl_samples["selective_error"][valid_error]
+            - softmax_samples["selective_error"][valid_error]
+        ).tolist()
+    edl_aurc_samples = _bootstrap_aurc_samples(
+        edl.label[primary_indices],
+        edl.success_probability[primary_indices],
+        edl.au[primary_indices],
+        episode_codes,
+        draws,
+    )
+    softmax_aurc_samples = _bootstrap_aurc_samples(
+        softmax.label[primary_indices],
+        softmax.success_probability[primary_indices],
+        predictive_entropy(softmax.success_probability[primary_indices]),
+        episode_codes,
+        draws,
+    )
+    bootstrap_aurc = (edl_aurc_samples - softmax_aurc_samples).tolist()
     edl_error = None if not edl_policy.get("available") else edl_policy["primary_selective_metrics"]["selective_error"]
     softmax_error = (
         None if not softmax_policy.get("available") else softmax_policy["primary_selective_metrics"]["selective_error"]
@@ -488,15 +524,15 @@ def _paired_edl_softmax_comparison(
         "softmax_constraint_satisfied": softmax_error is not None and softmax_error <= max_selective_error,
         "coverage_difference": _interval(
             coverage_difference,
-            [value[0] for value in bootstrap_values if value[0] is not None],
+            bootstrap_coverage,
             replicates,
         ),
         "selective_error_difference": _interval(
             error_difference,
-            [value[1] for value in bootstrap_values if value[1] is not None],
+            bootstrap_error,
             replicates,
         ),
-        "aurc_difference": _interval(aurc_difference, [value[2] for value in bootstrap_values], replicates),
+        "aurc_difference": _interval(aurc_difference, bootstrap_aurc, replicates),
         "difference_direction": {
             "coverage": "positive favors EDL AU",
             "selective_error": "negative favors EDL AU",
@@ -517,6 +553,78 @@ def _accepted_or_none(flat: _FlatPredictions, policy: Mapping[str, Any]) -> np.n
     ).accepted
 
 
+def _bootstrap_selective_samples(
+    labels: np.ndarray,
+    probability: np.ndarray,
+    accepted: np.ndarray,
+    episode_codes: np.ndarray,
+    draws: np.ndarray,
+) -> dict[str, np.ndarray]:
+    episode_count = int(draws.shape[1])
+    total = np.bincount(episode_codes, minlength=episode_count)
+    accepted_count = np.bincount(
+        episode_codes,
+        weights=accepted.astype(np.int64),
+        minlength=episode_count,
+    )
+    errors = (probability >= 0.5) != labels
+    accepted_errors = np.bincount(
+        episode_codes,
+        weights=(accepted & errors).astype(np.int64),
+        minlength=episode_count,
+    )
+    sampled_total = total[draws].sum(axis=1)
+    sampled_accepted = accepted_count[draws].sum(axis=1)
+    sampled_errors = accepted_errors[draws].sum(axis=1)
+    selective_error = np.full(draws.shape[0], np.nan, dtype=np.float64)
+    valid = sampled_accepted > 0
+    selective_error[valid] = sampled_errors[valid] / sampled_accepted[valid]
+    return {
+        "coverage": sampled_accepted / sampled_total,
+        "selective_error": selective_error,
+    }
+
+
+def _bootstrap_aurc_samples(
+    labels: np.ndarray,
+    probability: np.ndarray,
+    uncertainty: np.ndarray,
+    episode_codes: np.ndarray,
+    draws: np.ndarray,
+    *,
+    batch_size: int = 128,
+) -> np.ndarray:
+    """Compute exact episode-bootstrap AURC after sorting uncertainty once."""
+    errors = ((probability >= 0.5) != labels).astype(np.int64)
+    order = np.argsort(uncertainty, kind="mergesort")
+    sorted_uncertainty = uncertainty[order]
+    sorted_episode = episode_codes[order]
+    sorted_errors = errors[order]
+    group_starts = np.r_[0, np.flatnonzero(np.diff(sorted_uncertainty) != 0) + 1]
+    episode_count = int(draws.shape[1])
+    result = np.empty(draws.shape[0], dtype=np.float64)
+    for start in range(0, draws.shape[0], batch_size):
+        stop = min(start + batch_size, draws.shape[0])
+        batch_draws = draws[start:stop]
+        multiplicity = np.zeros((stop - start, episode_count), dtype=np.int16)
+        rows = np.repeat(np.arange(stop - start), episode_count)
+        np.add.at(multiplicity, (rows, batch_draws.reshape(-1)), 1)
+        weights = multiplicity[:, sorted_episode]
+        grouped_count = np.add.reduceat(weights, group_starts, axis=1)
+        grouped_errors = np.add.reduceat(weights * sorted_errors, group_starts, axis=1)
+        cumulative_count = np.cumsum(grouped_count, axis=1)
+        cumulative_errors = np.cumsum(grouped_errors, axis=1)
+        risk = np.divide(
+            cumulative_errors,
+            cumulative_count,
+            out=np.zeros_like(cumulative_errors, dtype=np.float64),
+            where=cumulative_count > 0,
+        )
+        total_count = cumulative_count[:, -1]
+        result[start:stop] = np.sum((grouped_count / total_count[:, None]) * risk, axis=1)
+    return result
+
+
 def _bootstrap_selective(
     flat: _FlatPredictions,
     accepted: np.ndarray,
@@ -526,21 +634,32 @@ def _bootstrap_selective(
     replicates: int,
 ) -> dict[str, Any]:
     episode_ids = np.unique(flat.episode_id[primary])
-    by_episode = {episode: np.flatnonzero(primary & (flat.episode_id == episode)) for episode in episode_ids}
+    primary_indices = np.flatnonzero(primary)
+    episode_codes = np.searchsorted(episode_ids, flat.episode_id[primary_indices])
+    total_by_episode = np.bincount(episode_codes, minlength=episode_ids.size)
+    accepted_by_episode = np.bincount(
+        episode_codes,
+        weights=accepted[primary_indices].astype(np.int64),
+        minlength=episode_ids.size,
+    )
+    errors = (flat.success_probability[primary_indices] >= 0.5) != flat.label[primary_indices]
+    accepted_errors_by_episode = np.bincount(
+        episode_codes,
+        weights=(accepted[primary_indices] & errors).astype(np.int64),
+        minlength=episode_ids.size,
+    )
     rng = np.random.default_rng(seed)
-    coverage: list[float] = []
-    accuracy: list[float] = []
-    for _ in range(replicates):
-        sampled = rng.choice(episode_ids, size=episode_ids.size, replace=True)
-        indices = np.concatenate([by_episode[str(episode)] for episode in sampled])
-        metrics = selective_metrics(flat.label[indices], flat.success_probability[indices], accepted[indices])
-        coverage.append(metrics["coverage"])
-        if metrics["selective_accuracy"] is not None:
-            accuracy.append(metrics["selective_accuracy"])
+    draws = rng.integers(0, episode_ids.size, size=(replicates, episode_ids.size))
+    sampled_total = total_by_episode[draws].sum(axis=1)
+    sampled_accepted = accepted_by_episode[draws].sum(axis=1)
+    sampled_errors = accepted_errors_by_episode[draws].sum(axis=1)
+    coverage = sampled_accepted / sampled_total
+    valid = sampled_accepted > 0
+    accuracy = 1.0 - sampled_errors[valid] / sampled_accepted[valid]
     base = selective_metrics(flat.label[primary], flat.success_probability[primary], accepted[primary])
     return {
-        "coverage": _interval(base["coverage"], coverage, replicates),
-        "selective_accuracy": _interval(base["selective_accuracy"], accuracy, replicates),
+        "coverage": _interval(base["coverage"], coverage.tolist(), replicates),
+        "selective_accuracy": _interval(base["selective_accuracy"], accuracy.tolist(), replicates),
     }
 
 

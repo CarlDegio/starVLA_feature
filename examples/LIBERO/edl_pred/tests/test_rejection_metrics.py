@@ -7,6 +7,7 @@ import numpy as np
 from examples.LIBERO.edl_pred.rejection_metrics import (
     EpisodeMetricRecord,
     aurc,
+    dual_threshold_frontier,
     error_detection_metrics,
     paired_episode_bootstrap,
     risk_coverage_curve,
@@ -62,6 +63,41 @@ class RejectionMetricsTest(unittest.TestCase):
         self.assertEqual(result.valid_replicates, 100)
         self.assertLessEqual(result.lower, result.estimate)
         self.assertGreaterEqual(result.upper, result.estimate)
+
+    def test_prefix_grid_dual_frontier_matches_exact_threshold_enumeration(self) -> None:
+        labels = np.asarray([0, 1, 0, 1, 1, 0])
+        probability = np.asarray([0.2, 0.4, 0.8, 0.7, 0.3, 0.1])
+        au = np.asarray([0.1, 0.2, 0.2, 0.4, 0.3, 0.4])
+        eu = np.asarray([0.4, 0.1, 0.3, 0.2, 0.2, 0.4])
+
+        actual = dual_threshold_frontier(labels, probability, au, eu)
+        expected = self._naive_dual_frontier(labels, probability, au, eu)
+
+        for field in ("accepted_count", "coverage", "risk", "tau_au", "tau_eu"):
+            np.testing.assert_allclose(actual[field], expected[field])
+
+    @staticmethod
+    def _naive_dual_frontier(labels, probability, au, eu):
+        errors = (probability >= 0.5) != labels
+        best = {}
+        for tau_au in (-np.inf, *np.unique(au), np.inf):
+            for tau_eu in (-np.inf, *np.unique(eu), np.inf):
+                accepted = (au <= tau_au) & (eu <= tau_eu)
+                count = int(accepted.sum())
+                if not count:
+                    continue
+                candidate = (float(errors[accepted].mean()), float(tau_au), float(tau_eu))
+                key = lambda value: (value[0], -value[1], -value[2], value[1], value[2])
+                if count not in best or key(candidate) < key(best[count]):
+                    best[count] = candidate
+        counts = np.asarray(sorted(best))
+        return {
+            "accepted_count": counts,
+            "coverage": counts / labels.size,
+            "risk": np.asarray([best[count][0] for count in counts]),
+            "tau_au": np.asarray([best[count][1] for count in counts]),
+            "tau_eu": np.asarray([best[count][2] for count in counts]),
+        }
 
 
 if __name__ == "__main__":

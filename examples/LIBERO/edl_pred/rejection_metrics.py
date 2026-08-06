@@ -9,7 +9,6 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from examples.LIBERO.edl_pred.metrics import binary_metrics
-from examples.LIBERO.edl_pred.rejection import candidate_thresholds
 
 
 @dataclass(frozen=True)
@@ -134,27 +133,43 @@ def dual_threshold_frontier(
         raise ValueError("au, eu, and labels must have the same shape")
     errors = (probability >= 0.5) != target
 
-    best_by_count: dict[int, tuple[float, float, float]] = {}
-    for tau_au in candidate_thresholds(au_score):
-        for tau_eu in candidate_thresholds(eu_score):
-            accepted = (au_score <= tau_au) & (eu_score <= tau_eu)
-            count = int(np.count_nonzero(accepted))
-            if count == 0:
-                continue
-            risk_value = float(np.mean(errors[accepted]))
-            candidate = (risk_value, float(tau_au), float(tau_eu))
-            current = best_by_count.get(count)
-            if current is None or _frontier_key(candidate) < _frontier_key(current):
-                best_by_count[count] = candidate
+    au_values, au_rank = np.unique(au_score, return_inverse=True)
+    eu_values, eu_rank = np.unique(eu_score, return_inverse=True)
+    shape = (au_values.size, eu_values.size)
+    accepted_grid = np.zeros(shape, dtype=np.int32)
+    error_grid = np.zeros(shape, dtype=np.int32)
+    np.add.at(accepted_grid, (au_rank, eu_rank), 1)
+    np.add.at(error_grid, (au_rank, eu_rank), errors.astype(np.int32))
+    np.cumsum(accepted_grid, axis=0, out=accepted_grid)
+    np.cumsum(accepted_grid, axis=1, out=accepted_grid)
+    np.cumsum(error_grid, axis=0, out=error_grid)
+    np.cumsum(error_grid, axis=1, out=error_grid)
 
-    counts = np.asarray(sorted(best_by_count), dtype=np.int64)
-    values = [best_by_count[int(count)] for count in counts]
+    # The maximum observed threshold and +inf accept the same records. Keep the
+    # less aggressive +inf representation to preserve the original tie break.
+    au_thresholds = au_values.astype(np.float64, copy=True)
+    eu_thresholds = eu_values.astype(np.float64, copy=True)
+    au_thresholds[-1] = np.inf
+    eu_thresholds[-1] = np.inf
+
+    flat_count = accepted_grid.reshape(-1)
+    flat_error = error_grid.reshape(-1)
+    minimum_error = np.full(target.size + 1, target.size + 1, dtype=np.int64)
+    np.minimum.at(minimum_error, flat_count, flat_error)
+    eligible = (flat_count > 0) & (flat_error == minimum_error[flat_count])
+    best_flat_index = np.full(target.size + 1, -1, dtype=np.int64)
+    flat_indices = np.arange(flat_count.size, dtype=np.int64)
+    np.maximum.at(best_flat_index, flat_count[eligible], flat_indices[eligible])
+
+    counts = np.flatnonzero(best_flat_index > -1).astype(np.int64)
+    selected = best_flat_index[counts]
+    au_indices, eu_indices = np.divmod(selected, eu_values.size)
     return {
         "accepted_count": _read_only(counts),
         "coverage": _read_only(counts.astype(np.float64) / target.size),
-        "risk": _read_only(np.asarray([value[0] for value in values], dtype=np.float64)),
-        "tau_au": _read_only(np.asarray([value[1] for value in values], dtype=np.float64)),
-        "tau_eu": _read_only(np.asarray([value[2] for value in values], dtype=np.float64)),
+        "risk": _read_only(minimum_error[counts].astype(np.float64) / counts),
+        "tau_au": _read_only(au_thresholds[au_indices]),
+        "tau_eu": _read_only(eu_thresholds[eu_indices]),
     }
 
 
@@ -442,11 +457,6 @@ def _one_dimensional(value: Any, name: str) -> np.ndarray:
     if array.ndim != 1 or array.size == 0:
         raise ValueError(f"{name} must be a non-empty one-dimensional array")
     return array
-
-
-def _frontier_key(candidate: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
-    risk, tau_au, tau_eu = candidate
-    return (risk, -tau_au, -tau_eu, tau_au, tau_eu)
 
 
 def _record_episode_id(record: Any) -> str:

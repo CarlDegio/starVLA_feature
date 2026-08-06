@@ -9,10 +9,12 @@ import h5py
 import numpy as np
 
 from examples.LIBERO.edl_pred.evaluate_rejection import (
+    _bootstrap_aurc_samples,
     evaluate_prediction_sets,
     publish_evaluation,
 )
 from examples.LIBERO.edl_pred.rejection_data import EpisodePrediction
+from examples.LIBERO.edl_pred.rejection_metrics import aurc, risk_coverage_curve
 
 
 class EvaluateRejectionTest(unittest.TestCase):
@@ -175,6 +177,24 @@ class EvaluateRejectionTest(unittest.TestCase):
         comparison = evaluation["matched_comparisons"][0]
         self.assertIsNone(comparison["coverage_difference"]["estimate"])
         self.assertIsNotNone(comparison["aurc_difference"]["estimate"])
+
+    def test_vectorized_episode_bootstrap_aurc_matches_explicit_resampling(self) -> None:
+        labels = np.asarray([0, 0, 1, 1])
+        probability = np.asarray([0.2, 0.7, 0.8, 0.3])
+        uncertainty = np.asarray([0.1, 0.4, 0.2, 0.3])
+        episode_codes = np.asarray([0, 0, 1, 1])
+        draws = np.asarray([[0, 1], [0, 0], [1, 1]])
+
+        actual = _bootstrap_aurc_samples(labels, probability, uncertainty, episode_codes, draws)
+        by_episode = (np.asarray([0, 1]), np.asarray([2, 3]))
+        expected = []
+        for draw in draws:
+            indices = np.concatenate([by_episode[index] for index in draw])
+            expected.append(aurc(risk_coverage_curve(
+                labels[indices], probability[indices], uncertainty[indices]
+            )))
+
+        np.testing.assert_allclose(actual, expected)
 
 
 if __name__ == "__main__":
