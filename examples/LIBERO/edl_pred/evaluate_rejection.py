@@ -52,6 +52,16 @@ class _FlatPredictions:
     eu: np.ndarray | None
 
 
+@dataclass(frozen=True)
+class _RiskCoverageSpec:
+    run_name: str
+    policy_name: str
+    label: str
+    color: str
+    linestyle: str
+    marker: str
+
+
 def evaluate_prediction_sets(
     calibration: Mapping[str, Any],
     predictions_by_run: Mapping[str, Sequence[EpisodePrediction]],
@@ -784,20 +794,110 @@ def _write_prediction_hdf5(
                         )
 
 
-def _plot_risk_coverage(path: Path, evaluation: Mapping[str, Any]) -> None:
-    figure, axis = plt.subplots(figsize=(8, 5))
+def _risk_coverage_specs(evaluation: Mapping[str, Any]) -> tuple[_RiskCoverageSpec, ...]:
+    """Select AU for EDL heads and predictive entropy for softmax heads."""
+    styles = {
+        ("token_attention_pool", "learned"): ("AttnPool", "#0072B2", "o"),
+        ("token_attention_pool", "none"): ("AttnPool", "#D55E00", "^"),
+        ("token_attention_pool", "sinusoidal"): ("AttnPool", "#009E73", "s"),
+        ("mlp_flat", "none"): ("MLP", "#CC79A7", "D"),
+        ("token_self_attention", "sinusoidal"): ("SelfAttn", "#E69F00", "v"),
+    }
+    specs = []
     for run_name, run in evaluation["runs"].items():
-        for policy_name, policy in run["policies"].items():
-            if "risk_coverage" not in policy:
-                continue
-            curve = policy["risk_coverage"]
-            axis.plot(curve["coverage"], curve["risk"], label=f"{run_name}:{policy_name}", alpha=0.8)
-    axis.axhline(0.2, color="black", linestyle="--", linewidth=1)
-    axis.set(xlabel="Coverage", ylabel="Selective risk", xlim=(0, 1), ylim=(0, 1))
-    axis.legend(fontsize=6)
-    figure.tight_layout()
-    figure.savefig(path, dpi=160)
-    plt.close(figure)
+        head = run.get("head")
+        if head == "edl":
+            policy_name = "au"
+            head_label = "EDL"
+            linestyle = "-"
+        elif head == "softmax":
+            policy_name = "predictive_entropy"
+            head_label = "softmax"
+            linestyle = "--"
+        else:
+            raise ValueError(f"unsupported verifier head for risk--coverage plot: {head!r}")
+        if policy_name not in run["policies"]:
+            raise ValueError(f"run {run_name!r} is missing policy {policy_name!r}")
+
+        encoder = run.get("chunk_encoder")
+        position = run.get("token_position_encoding")
+        encoder_label, color, marker = styles.get(
+            (encoder, position),
+            (str(encoder), "#666666", "x"),
+        )
+        position_suffix = ""
+        if encoder == "token_attention_pool":
+            position_label = {"learned": "learned", "none": "none", "sinusoidal": "sin."}.get(
+                position,
+                str(position),
+            )
+            position_suffix = f" ({position_label})"
+        specs.append(
+            _RiskCoverageSpec(
+                run_name=run_name,
+                policy_name=policy_name,
+                label=f"{encoder_label} {head_label}{position_suffix}",
+                color=color,
+                linestyle=linestyle,
+                marker=marker,
+            )
+        )
+    return tuple(specs)
+
+
+def _plot_risk_coverage(path: Path, evaluation: Mapping[str, Any]) -> None:
+    style = {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "font.size": 8,
+        "axes.labelsize": 8,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        "legend.fontsize": 6.8,
+        "axes.linewidth": 0.7,
+    }
+    with plt.rc_context(style):
+        figure, axis = plt.subplots(figsize=(3.5, 3.15))
+        for spec in _risk_coverage_specs(evaluation):
+            curve = evaluation["runs"][spec.run_name]["policies"][spec.policy_name]["risk_coverage"]
+            line, = axis.plot(
+                curve["coverage"],
+                curve["risk"],
+                color=spec.color,
+                linestyle=spec.linestyle,
+                linewidth=1.25,
+                marker=spec.marker,
+                markevery=350,
+                markersize=2.3,
+                markeredgewidth=0.4,
+                label=spec.label,
+            )
+            if spec.linestyle == "--":
+                line.set_dashes((4.0, 2.0))
+
+        axis.axhline(0.20, color="black", linestyle=(0, (3, 2)), linewidth=0.9)
+        axis.set_xlabel("Coverage")
+        axis.set_ylabel("Selective risk")
+        axis.set_xlim(0.0, 1.0)
+        axis.set_ylim(0.0, 0.55)
+        axis.set_xticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+        axis.set_yticks([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.tick_params(width=0.7, length=3)
+        axis.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.015),
+            ncol=2,
+            frameon=False,
+            handlelength=2.6,
+            columnspacing=0.9,
+            handletextpad=0.5,
+            borderaxespad=0.0,
+        )
+        figure.subplots_adjust(left=0.16, right=0.985, bottom=0.15, top=0.72)
+        figure.savefig(path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+        plt.close(figure)
 
 
 def _plot_metrics_by_chunk(path: Path, evaluation: Mapping[str, Any]) -> None:

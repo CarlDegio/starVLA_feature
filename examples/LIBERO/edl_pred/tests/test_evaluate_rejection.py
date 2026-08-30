@@ -10,6 +10,7 @@ import numpy as np
 
 from examples.LIBERO.edl_pred.evaluate_rejection import (
     _bootstrap_aurc_samples,
+    _risk_coverage_specs,
     evaluate_prediction_sets,
     publish_evaluation,
 )
@@ -155,6 +156,23 @@ class EvaluateRejectionTest(unittest.TestCase):
         mismatched["softmax"] = mismatched["softmax"][:-1]
         with self.assertRaisesRegex(ValueError, "identities"):
             evaluate_prediction_sets(self.calibration, mismatched, bootstrap_replicates=5)
+
+    def test_risk_coverage_plot_selects_head_specific_rejection_scores(self) -> None:
+        evaluation = evaluate_prediction_sets(
+            self.calibration,
+            self.predictions,
+            bootstrap_replicates=5,
+        )
+
+        specs = _risk_coverage_specs(evaluation)
+
+        self.assertEqual(
+            [(spec.run_name, spec.policy_name, spec.linestyle) for spec in specs],
+            [
+                ("edl", "au", "-"),
+                ("softmax", "predictive_entropy", "--"),
+            ],
+        )
 
     def test_unavailable_default_retains_targets_and_matched_aurc(self) -> None:
         calibration = dict(self.calibration)

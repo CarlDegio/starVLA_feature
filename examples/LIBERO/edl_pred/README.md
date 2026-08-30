@@ -193,3 +193,20 @@ and paired episode-bootstrap comparisons between matched EDL AU and softmax
 entropy. `UNDETERMINED` chunks count against coverage but are excluded from
 conditional selective accuracy. Chunks after 10 are retained with explicit
 incomplete-support counts and are diagnostic rather than primary.
+
+## Verifier-Overlay Videos
+
+With the EDL 1e-2 policy server running on the matching checkpoint, render five
+initial states of one task with the causal verifier's current AU, failure
+probability, and success probability in the top-right corner:
+
+```bash
+bash examples/LIBERO/edl_pred/render_verifier_videos.sh
+```
+
+The default is `libero_10` task 0 and the frozen
+`all_mlp_flat_edl_seed7/checkpoints/best.pt` verifier. Configure another task
+with `TASK_SUITE_NAME`, `TASK_ID`, and `EPISODE_START_INDEX`. The launcher
+requires exactly five videos and refuses existing outputs unless `OVERWRITE=1`
+is set. It writes the MP4 files and `manifest.json` under the policy run's
+`results/edl_pred_videos/` directory.
