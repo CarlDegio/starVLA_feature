@@ -41,10 +41,6 @@ if [[ ! "${NUM_VIDEOS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "NUM_VIDEOS must be a positive integer."
   exit 1
 fi
-if [[ "${NUM_VIDEOS}" != "5" ]]; then
-  echo "This presentation renderer requires NUM_VIDEOS=5."
-  exit 1
-fi
 
 TASK_ID_DECIMAL=$((10#${TASK_ID}))
 MODEL_ROOT="${CKPT%%/checkpoints/*}"
