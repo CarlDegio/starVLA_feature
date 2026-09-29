@@ -1,0 +1,15 @@
+dataset_paths: []
+output_dir: /tmp/starvla_safe_smoke
+run_name: safe_lstm_smoke
+backbone: lstm
+feature_aggregation: last
+hidden_dim: 8
+num_layers: 1
+epochs: 2
+batch_size: 4
+learning_rate: 0.001
+weight_decay: 0.0
+val_fraction: 0.25
+seed: 7
+device: cpu
+early_stopping_patience: 0

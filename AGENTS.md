@@ -88,6 +88,29 @@ wandb metadata, final models, and LIBERO result artifacts.
   experiment scripts and framework files may already be edited for active runs.
 - Use `rg` for code search and inspect local scripts before assuming the current
   training or evaluation command.
+
+## QwenFast Token Uncertainty and SAFE
+
+The original QwenFast policy supports optional inference diagnostics in:
+
+- `starVLA/model/framework/VLM4A/qwenfast_diagnostics.py`
+- `starVLA/model/framework/VLM4A/QwenFast.py`
+
+The diagnostics expose full-vocabulary selected-token NLL, predictive entropy,
+and final-layer action-token embeddings without changing QwenFast weights or
+checkpoint keys. Do not interpret these softmax quantities as QwenEDL AU/EU.
+
+SAFE-style collection, token-baseline evaluation, and latent-feature detector
+training live under:
+
+```text
+examples/LIBERO/safe_pred/
+```
+
+Use `collect_libero_safe.sh` with the original `qwen3fast_libero_all`
+checkpoint. The policy server runs in `starvla`; the collector runs in the
+`libero` environment and writes one HDF5 file per suite without videos. See
+`examples/LIBERO/safe_pred/README.md` for commands and metric definitions.
 <!-- ARIS-CODEX:BEGIN -->
 ## ARIS Codex Skill Scope
 ARIS Codex packages installed in this project: skills-codex

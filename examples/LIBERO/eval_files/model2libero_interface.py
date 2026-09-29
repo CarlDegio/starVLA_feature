@@ -43,6 +43,8 @@ class ModelClient:
         host: str = "0.0.0.0",
         port: int = 10095,
         image_size: Sequence[int] = (224, 224),
+        return_token_uncertainty: bool = False,
+        return_latent_features: bool = False,
     ) -> None:
         # Connect & receive handshake metadata (action_chunk_size, etc.)
         self.client = WebsocketClientPolicy(host, port)
@@ -65,6 +67,8 @@ class ModelClient:
         self.action_ensemble = action_ensemble
         self.adaptive_ensemble_alpha = adaptive_ensemble_alpha
         self.action_ensemble_horizon = action_ensemble_horizon
+        self.return_token_uncertainty = bool(return_token_uncertainty)
+        self.return_latent_features = bool(return_latent_features)
 
         # Gripper sticky state (kept for parity with the previous client; not
         # currently consumed by LIBERO but other policy_setup paths use it).
@@ -86,6 +90,7 @@ class ModelClient:
         # Cached unnormalized chunk; refreshed every `action_chunk_size` steps.
         self.raw_actions: Optional[np.ndarray] = None
         self.chunk_uncertainty: Optional[dict] = None
+        self.chunk_diagnostics: Optional[dict] = None
 
     @property
     def server_metadata(self) -> dict:
@@ -127,6 +132,55 @@ class ModelClient:
             max_run = max(max_run, current_run)
         return max_run
 
+    @staticmethod
+    def _extract_qwenfast_chunk_diagnostics(data: dict, chunk_idx: int) -> Optional[dict]:
+        diagnostic_names = (
+            "action_token_ids",
+            "action_token_nll",
+            "action_token_entropy",
+            "action_token_embedding_first",
+            "action_token_embedding_last",
+            "action_token_embedding_mean",
+        )
+        if not any(name in data for name in diagnostic_names):
+            return None
+
+        count_value = data.get("num_action_tokens")
+        if count_value is None:
+            raise ValueError("QwenFast diagnostics are missing num_action_tokens")
+        count_array = np.asarray(count_value)
+        if count_array.size == 0:
+            raise ValueError("QwenFast num_action_tokens is empty")
+        count = int(count_array.reshape(-1)[0])
+        if count < 0:
+            raise ValueError("QwenFast num_action_tokens must be non-negative")
+
+        def first_batch_row(name: str, *, trim: Optional[int] = None, integer: bool = False):
+            if name not in data:
+                return None
+            dtype = np.int64 if integer else np.float32
+            values = np.asarray(data[name], dtype=dtype)
+            row = values.reshape(-1) if values.ndim <= 1 else values[0].reshape(-1)
+            if trim is not None:
+                if row.size < trim:
+                    raise ValueError(f"QwenFast diagnostic {name} is shorter than num_action_tokens")
+                row = row[:trim]
+            if not integer and not np.all(np.isfinite(row)):
+                raise ValueError(f"QwenFast diagnostic {name} contains non-finite values")
+            return [int(value) for value in row] if integer else [float(value) for value in row]
+
+        result = {
+            "chunk_idx": int(chunk_idx),
+            "num_action_tokens": count,
+            "action_token_ids": first_batch_row("action_token_ids", trim=count, integer=True),
+            "action_token_nll": first_batch_row("action_token_nll", trim=count),
+            "action_token_entropy": first_batch_row("action_token_entropy", trim=count),
+            "action_token_embedding_first": first_batch_row("action_token_embedding_first"),
+            "action_token_embedding_last": first_batch_row("action_token_embedding_last"),
+            "action_token_embedding_mean": first_batch_row("action_token_embedding_mean"),
+        }
+        return {key: value for key, value in result.items() if value is not None}
+
     def reset(self, task_description: str) -> None:
         self.task_description = task_description
         self.image_history.clear()
@@ -139,6 +193,7 @@ class ModelClient:
         self.previous_gripper_action = None
         self.raw_actions = None
         self.chunk_uncertainty = None
+        self.chunk_diagnostics = None
 
     def step(self, example: dict, step: int = 0, **kwargs) -> dict:
         """One env step.
@@ -178,6 +233,8 @@ class ModelClient:
                 "do_sample": False,
                 "use_ddim": self.use_ddim,
                 "num_ddim_steps": self.num_ddim_steps,
+                "return_token_uncertainty": self.return_token_uncertainty,
+                "return_latent_features": self.return_latent_features,
             }
             response = self.client.predict_action(vla_input)
             try:
@@ -190,6 +247,9 @@ class ModelClient:
             self.raw_actions = np.asarray(actions_batch)[0]  # (T, D)
             data = response.get("data", {})
             chunk_idx = int(step // self.action_chunk_size)
+            self.chunk_diagnostics = self._extract_qwenfast_chunk_diagnostics(data, chunk_idx)
+            if self.chunk_diagnostics is not None:
+                self.chunk_diagnostics["policy_step"] = int(step)
             chunk_mean = self._first_batch_scalar(data.get("uncertainty"))
             token_uncertainty = self._first_batch_sequence(data.get("token_uncertainty"))
             action_token_confidence_mean = self._first_batch_scalar(
@@ -303,6 +363,7 @@ class ModelClient:
             "raw_action": raw_action,
             "new_chunk": refresh_chunk,
             "uncertainty": self.chunk_uncertainty if refresh_chunk else None,
+            "diagnostics": self.chunk_diagnostics if refresh_chunk else None,
         }
 
     def visualize_epoch(

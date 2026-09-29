@@ -200,8 +200,9 @@ at clean exit.
 
 - [ ] **Step 5: Add the shell entrypoint and argument tests**
 
-`collect_libero_safe.sh` follows `collect_libero_dataset.sh`, defaults to 100
-trials per task, writes beneath `examples/LIBERO/safe_pred/datasets/`, supports
+`collect_libero_safe.sh` follows `collect_libero_dataset.sh`, defaults to 10
+trials per task (100 trajectories for a 10-task suite), writes beneath
+`examples/LIBERO/safe_pred/datasets/`, supports
 `OVERWRITE`/`RESUME`, and produces no videos. Test shell syntax and the Python
 argument validation without importing MuJoCo.
 

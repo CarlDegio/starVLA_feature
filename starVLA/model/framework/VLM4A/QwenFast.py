@@ -35,6 +35,7 @@ IGNORE_INDEX = -100
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config
+from starVLA.model.framework.VLM4A.qwenfast_diagnostics import compute_generation_diagnostics
 from starVLA.model.modules.action_model.fast_ActionHeader import get_action_model
 from starVLA.model.modules.vlm import get_vlm_model
 
@@ -77,6 +78,14 @@ class QwenFastDefaultConfig:
             "future_action_window_size": 15,
             # How many past steps included in action chunk (usually 0)
             "past_action_window_size": 0,
+        }
+    )
+
+    # === Optional inference-only observability ===
+    inference_diagnostics: dict = field(
+        default_factory=lambda: {
+            "token_uncertainty": False,
+            "latent_features": False,
         }
     )
 
@@ -179,7 +188,7 @@ class Qwenvl_Fast(baseframework):
     def predict_action(
         self,
         examples: List[dict] = None,
-        **kwargs: str,
+        **kwargs: Any,
     ) -> np.ndarray:
         """
         Inference: single forward pass to obtain future actions (no diffusion sampling).
@@ -206,13 +215,40 @@ class Qwenvl_Fast(baseframework):
         # Step 1: QWenVL input format
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
 
+        diagnostics_config = self.config.framework.get("inference_diagnostics", {})
+        return_all_diagnostics = bool(kwargs.get("return_diagnostics", False))
+        return_token_uncertainty = bool(
+            kwargs.get(
+                "return_token_uncertainty",
+                return_all_diagnostics or diagnostics_config.get("token_uncertainty", False),
+            )
+        )
+        return_latent_features = bool(
+            kwargs.get(
+                "return_latent_features",
+                return_all_diagnostics or diagnostics_config.get("latent_features", False),
+            )
+        )
+
         eval_max_new_tokens = int(self.config.trainer.get("eval_max_new_tokens", 64))
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            generated_ids = self.qwen_vl_interface.model.generate(
-                **qwen_inputs,
-                max_new_tokens=eval_max_new_tokens,
-                do_sample=False,
-            )
+            if return_token_uncertainty or return_latent_features:
+                generated = self.qwen_vl_interface.model.generate(
+                    **qwen_inputs,
+                    max_new_tokens=eval_max_new_tokens,
+                    do_sample=False,
+                    return_dict_in_generate=True,
+                    output_scores=return_token_uncertainty,
+                    output_hidden_states=return_latent_features,
+                )
+                generated_ids = generated.sequences
+            else:
+                generated = None
+                generated_ids = self.qwen_vl_interface.model.generate(
+                    **qwen_inputs,
+                    max_new_tokens=eval_max_new_tokens,
+                    do_sample=False,
+                )
         # --- Extract and decoder vlm_action to continue actions ---
         # --- extrace token (index based on VLM) ---
         batch_vlm_action_token_ids = self._extract_action_token_ids(generated_ids)
@@ -221,7 +257,18 @@ class Qwenvl_Fast(baseframework):
         # --- decode fast tokenizer index to action semantic ---
         normalized_actions = self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
 
-        return {"normalized_actions": normalized_actions}
+        result = {"normalized_actions": normalized_actions}
+        if generated is not None:
+            result.update(
+                compute_generation_diagnostics(
+                    generated,
+                    action_token_min=int(self.qwen_vl_interface._ACTION_TOKEN_MIN),
+                    action_token_max=int(self.qwen_vl_interface._ACTION_TOKEN_MAX),
+                    include_token_uncertainty=return_token_uncertainty,
+                    include_latent_features=return_latent_features,
+                )
+            )
+        return result
 
     def _extract_action_token_ids(
         self,

@@ -171,6 +171,14 @@ class PolicyServerWrapper:
             "action_token_epistemic_uncertainty",
             "action_token_confidence_threshold",
             "action_token_confidence_above_threshold_ratio",
+            "action_token_ids",
+            "action_token_mask",
+            "num_action_tokens",
+            "action_token_nll",
+            "action_token_entropy",
+            "action_token_embedding_first",
+            "action_token_embedding_last",
+            "action_token_embedding_mean",
         ):
             if key in out:
                 ret[key] = np.asarray(out[key])

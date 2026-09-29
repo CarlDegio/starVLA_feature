@@ -1,0 +1,19 @@
+dataset_paths:
+  - examples/LIBERO/safe_pred/datasets/qwen3fast_libero_all_steps_30000_pytorch_model_safe_metric_train_seed7_libero_spatial.hdf5
+  - examples/LIBERO/safe_pred/datasets/qwen3fast_libero_all_steps_30000_pytorch_model_safe_metric_train_seed7_libero_object.hdf5
+  - examples/LIBERO/safe_pred/datasets/qwen3fast_libero_all_steps_30000_pytorch_model_safe_metric_train_seed7_libero_goal.hdf5
+  - examples/LIBERO/safe_pred/datasets/qwen3fast_libero_all_steps_30000_pytorch_model_safe_metric_train_seed7_libero_10.hdf5
+output_dir: examples/LIBERO/safe_pred/runs
+run_name: safe_mlp_last_train_seed7
+backbone: mlp
+feature_aggregation: last
+hidden_dim: 256
+num_layers: 1
+epochs: 1000
+batch_size: 64
+learning_rate: 0.0001
+weight_decay: 1.0
+val_fraction: 0.1
+seed: 7
+device: auto
+early_stopping_patience: 0
