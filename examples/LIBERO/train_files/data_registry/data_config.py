@@ -96,3 +96,12 @@ DATASET_NAMED_MIXTURES = {
         ("LEROBOT_LIBERO_DATA/libero_10_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
     ],
 }
+
+# Real-robot task definitions remain next to their conversion/training scripts.
+from examples.LIBERO.train_real.data_config import (
+    ROBOT_TYPE_CONFIG_MAP as _REAL_CONFIGS,
+    DATASET_NAMED_MIXTURES as _REAL_MIXTURES,
+)
+
+ROBOT_TYPE_CONFIG_MAP.update(_REAL_CONFIGS)
+DATASET_NAMED_MIXTURES.update(_REAL_MIXTURES)
