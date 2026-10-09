@@ -260,7 +260,7 @@ class Qwenvl_EDL(baseframework):
             action_token_confidence_above_threshold_ratio,
         ) = self._compute_generation_uncertainty(generated)
 
-        return {
+        result = {
             "normalized_actions": normalized_actions,
             "uncertainty": uncertainty,
             "token_uncertainty": token_uncertainty,
@@ -272,6 +272,47 @@ class Qwenvl_EDL(baseframework):
             "action_token_epistemic_uncertainty": action_token_epistemic_uncertainty,
             "action_token_confidence_threshold": action_token_confidence_threshold,
             "action_token_confidence_above_threshold_ratio": action_token_confidence_above_threshold_ratio,
+        }
+        if kwargs.get("return_edl_details", False):
+            result.update(self._generation_edl_details(generated))
+        return result
+
+    def _generation_edl_details(self, generated) -> dict:
+        """Optional replayable action-vocabulary top-k Dirichlet parameters.
+
+        This adds no parameters and does not change decoding. Selected-token
+        evidence alone is insufficient to reconstruct AU/EU; retain all top-k
+        alpha values and their vocabulary IDs for each generated action token.
+        """
+        act_min, act_max = self._action_token_range()
+        batch = generated.sequences.shape[0]
+        steps = len(generated.scores)
+        k = min(int(self.edl_topk), act_max - act_min + 1)
+        ids = generated.sequences[:, -steps:] if steps else generated.sequences[:, :0]
+        mask = (ids >= act_min) & (ids <= act_max)
+        lengths = mask.sum(dim=1).cpu().numpy().astype(np.int32)
+        width = int(lengths.max()) if len(lengths) else 0
+        alpha_out = np.full((batch, width, k), np.nan, dtype=np.float32)
+        topk_ids = np.full((batch, width, k), -1, dtype=np.int64)
+        action_ids = np.full((batch, width), -1, dtype=np.int64)
+        if steps:
+            alphas, candidates = [], []
+            for scores in generated.scores:
+                values, indices = scores.float()[:, act_min:act_max + 1].topk(k, dim=-1)
+                alphas.append(self._logits_to_alpha(values))
+                candidates.append(indices + act_min)
+            alphas = torch.stack(alphas, dim=1)
+            candidates = torch.stack(candidates, dim=1)
+            for row, length in enumerate(lengths):
+                alpha_out[row, :length] = alphas[row][mask[row]].detach().cpu().numpy()
+                topk_ids[row, :length] = candidates[row][mask[row]].cpu().numpy()
+                action_ids[row, :length] = ids[row][mask[row]].cpu().numpy()
+        return {
+            "action_token_topk_alpha": alpha_out,
+            "action_token_topk_ids": topk_ids,
+            "action_token_ids": action_ids,
+            "action_token_mask": np.arange(width)[None, :] < lengths[:, None],
+            "num_action_tokens": lengths,
         }
 
     def _action_token_range(self) -> Tuple[int, int]:

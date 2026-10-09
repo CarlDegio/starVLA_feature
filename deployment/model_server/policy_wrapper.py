@@ -167,6 +167,8 @@ class PolicyServerWrapper:
             "action_token_confidence_mean",
             "action_token_rank",
             "action_token_evidence",
+            "action_token_topk_alpha",
+            "action_token_topk_ids",
             "action_token_aleatoric_uncertainty",
             "action_token_epistemic_uncertainty",
             "action_token_confidence_threshold",

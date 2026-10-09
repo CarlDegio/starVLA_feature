@@ -14,6 +14,14 @@ class EDLRealDualArmDataConfig:
     video_keys = ["video.top", "video.left", "video.right"]
     state_keys = ["state.left_joints", "state.right_joints", "state.left_gripper", "state.right_gripper"]
     action_keys = [key.replace("state.", "action.") for key in state_keys]
+    # Match convert_edl_real.SLICES when splitting saved 14-D normalization stats.
+    state_key_dims = {
+        "state.left_joints": 6,
+        "state.right_joints": 6,
+        "state.left_gripper": 1,
+        "state.right_gripper": 1,
+    }
+    action_key_dims = {key.replace("state.", "action."): dim for key, dim in state_key_dims.items()}
     language_keys = ["annotation.human.action.task_description"]
 
     def modality_config(self):

@@ -239,6 +239,7 @@ examples/LIBERO/eval_files/datasets/*.hdf5
 */**/*.md
 */*.md
 !examples/**/README.md
+!deployment/real/README.md
 
 # Whitelist specific docs that should be tracked
 !.github/PULL_REQUEST_TEMPLATE.md
@@ -272,3 +273,6 @@ datasets/
 runs/
 logs/
 outputs/
+
+# Raw real-robot observations and generated verifier artifacts.
+examples/LIBERO/edl_pred_real/records/

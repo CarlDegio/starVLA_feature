@@ -1,0 +1,3 @@
+# Additional dependency for HDF5 export / the existing trajectory verifier.
+# Collection runs in the YAM environment and uses only NumPy + stdlib.
+h5py>=3.10,<4

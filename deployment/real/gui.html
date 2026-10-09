@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StarVLA · 单次执行与 EDL 采集</title>
+<style>
+body{font:16px system-ui;background:#111820;color:#e4edf5;max-width:1120px;margin:32px auto;padding:0 20px}h1{font-size:26px}fieldset{border:1px solid #3b4c5a;border-radius:10px;margin:16px 0;padding:16px}label{display:inline-flex;flex-direction:column;gap:6px;margin:6px}input,button{font:inherit;padding:10px;border-radius:6px;border:1px solid #587080}input{background:#1c2935;color:white}button{cursor:pointer;background:#dceaf4;color:#142333;margin:5px}button:disabled{opacity:.45;cursor:default}.primary{background:#61d8b0}.danger{background:#ff7373}.views{display:flex;gap:12px}.views figure{width:33%;margin:0}.views img{width:100%;background:#263442;aspect-ratio:4/3;object-fit:contain}pre{white-space:pre-wrap;word-break:break-all}.muted{color:#9eb3c5}.error{color:#ff9f9f}
+</style>
+<h1>StarVLA · 单次执行与 EDL 采集</h1>
+<p>一次触发只推理并执行一个 horizon（15 步），完成后等待。多次触发属于同一条 episode。</p>
+<fieldset id="settings"><legend>本轮设置（首个 horizon 开始后固定）</legend>
+<label>模型 Host<input id="host" value="127.0.0.1"></label><label>端口<input id="port" type="number" value="8002"></label>
+<label>关节限速 rad/s<input id="speed" type="number" min="0.01" step="0.1" value="0.3"></label>
+<label>Collection ID<input id="collection" value="real_train_v1"></label><label>Seed namespace<input id="namespace" value="real_train_v1"></label>
+<label style="display:flex">任务指令（留空使用服务默认文本）<input id="prompt"></label>
+</fieldset>
+<button id="check">检查模型连接（不执行）</button><button id="preview">开启相机预览</button>
+<button id="step" class="primary">执行一个 horizon</button><button id="end">Stop episode · 返回本轮起点</button>
+<button id="label">标记结果 y / n / drop</button><button id="estop" class="danger">E-STOP · 停止并保持</button>
+<button id="reset">Reset Session（急停恢复）</button>
+<p class="muted">第一次执行会初始化机械臂，并记录首次推理前的实际姿态。结束 episode 会主动返回该姿态（包括夹爪），随后填写结果；回位失败会明确提示。急停不会自动回位。</p>
+<p id="status">正在读取状态…</p><pre id="home"></pre>
+<fieldset><legend>最新 chunk 的最后一个 action</legend>
+<p id="chunk-status">尚未推理</p><pre id="chunk-action"></pre>
+<p class="muted">显示模型原始预测目标：左臂 6 关节 + 左夹爪，右臂 6 关节 + 右夹爪。关节单位 rad，夹爪 0～1。下发时仍受限速和夹爪限幅约束；步数表示客户端完成下发，不代表机械臂已到达预测目标。</p>
+</fieldset><pre id="message"></pre>
+<div id="views" class="views"></div>
+<script>
+const $=id=>document.getElementById(id);
+let state=null, busy=false, prompted=null, cameras=[];
+function payload(){return {host:$('host').value,port:Number($('port').value),prompt:$('prompt').value,
+ collection_id:$('collection').value,seed_namespace:$('namespace').value,max_joint_speed:Number($('speed').value)};}
+async function post(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):null});const data=await response.json();if(!response.ok)throw Error(data.detail||response.statusText);return data;}
+function message(value,error=false){$('message').textContent=typeof value==='string'?value:JSON.stringify(value,null,2);$('message').className=error?'error':'';}
+async function act(fn){try{return await fn();}catch(error){message(error.message,true);}}
+function renderChunk(chunk){
+ if(!chunk){$('chunk-status').textContent='尚未推理';$('chunk-action').textContent='';return;}
+ const labels={inferring:'等待预测',executing:'正在下发',completed:'下发完成',cancelled:'已取消',error:'发生错误'};
+ $('chunk-status').textContent=`Chunk #${chunk.chunk_number} · ${labels[chunk.status]||chunk.status} · 已下发 ${chunk.completed_rows}/${chunk.horizon} 步`;
+ const action=chunk.last_action;
+ const values=a=>a.map(v=>Number(v).toFixed(5)).join(', ');
+ const speed=chunk.max_model_speed;
+ const armSpeed=chunk.max_model_arm_speed, chunkSpeed=chunk.max_chunk_target_speed;
+ const speedLine=Number.isFinite(chunkSpeed)?`本 chunk 目标变化最大速度（含实测起点→首个 action，全14维）: ${chunkSpeed.toFixed(5)}（${chunk.max_chunk_target_speed_joint}，${chunk.max_chunk_target_speed_from}→${chunk.max_chunk_target_speed_to}；关节 rad/s，夹爪值/s）\n12个机械臂 joint 最大速度: ${chunk.max_chunk_arm_speed.toFixed(5)}（${chunk.max_chunk_arm_speed_joint}，${chunk.max_chunk_arm_speed_from}→${chunk.max_chunk_arm_speed_to}；rad/s）\n模型 action 之间相邻步最大速度（不含实测起点）: ${speed.toFixed(5)}（${chunk.max_model_speed_joint}，action_${chunk.max_model_speed_step}→action_${chunk.max_model_speed_step+1}）`:'模型原始 action 最大速度尚未计算';
+ const matrix=chunk.all_actions;
+ const matrixText=Array.isArray(matrix)?`\n\n完整 chunk action（反归一化、未限幅）\n${matrix.map((row,i)=>`action_${i+1}: [${values(row)}]`).join('\n')}`:'';
+ $('chunk-action').textContent=action?`最后一步（第 ${chunk.horizon} 步）预测目标\n左臂: [${values(action.slice(0,6))}]  左夹爪: ${values(action.slice(6,7))}\n右臂: [${values(action.slice(7,13))}]  右夹爪: ${values(action.slice(13,14))}\n${speedLine}${matrixText}`:'本 chunk 尚未返回预测';
+}
+async function askLabel(){if(!state||state.phase!=='await_label')return;const episode=state.episode_id;prompted=episode;
+ const answer=window.prompt((state.error?state.error+'\n':'已返回本轮首次推理前的姿态。\n')+'输入 y=成功，n=失败，drop=删除整条记录；取消则保留待标注。');
+ if(answer===null)return;const decision=answer.trim().toLowerCase();if(!['y','n','drop'].includes(decision)){message('请输入 y、n 或 drop',true);return;}
+ await act(async()=>{message(await post('/api/real/label',{episode_id:episode,decision}));await refresh();});}
+async function refresh(){try{state=await fetch('/api/real/status').then(r=>r.json());
+ $('status').textContent=`状态：${state.phase} · 已请求 ${state.chunks} 个 chunk · ${state.path||'尚未开始 episode'}${state.mock?' · MOCK':''}`;
+ $('home').textContent=state.home_pose?`本轮返回姿态: ${JSON.stringify(state.home_pose)}`:'将在首次推理前记录本轮返回姿态';$('home').className='';
+ renderChunk(state.latest_chunk);
+ $('settings').disabled=state.phase!=='idle';$('step').disabled=busy||!['idle','paused'].includes(state.phase)||!!state.home_error||state.estopped;
+ $('end').disabled=!['busy','paused','error'].includes(state.phase);$('label').disabled=state.phase!=='await_label';$('reset').disabled=state.phase!=='idle';
+ if(state.cameras.map(c=>c.name).join()!=cameras.map(c=>c.name).join()){cameras=state.cameras;$('views').replaceChildren(...cameras.map(c=>{const fig=document.createElement('figure'),cap=document.createElement('figcaption'),img=document.createElement('img');cap.textContent=c.role;img.id='cam-'+c.name;fig.append(img,cap);return fig;}));}
+ if(state.phase==='await_label'&&prompted!==state.episode_id)await askLabel();
+ }catch(error){message(error.message,true);}}
+$('check').onclick=()=>act(async()=>{const data=await post('/api/real/check',payload());if(!$('prompt').value)$('prompt').value=data.metadata.default_prompt;message(data);});
+$('preview').onclick=()=>act(async()=>{await post('/api/collect/connect');message('相机已连接；未执行动作。');});
+$('step').onclick=async()=>{if(busy)return;busy=true;$('step').disabled=true;await act(async()=>message(await post('/api/real/step',payload())));busy=false;await refresh();};
+$('end').onclick=()=>act(async()=>{message(await post('/api/real/end'));await refresh();});
+$('label').onclick=askLabel;
+$('estop').onclick=()=>act(async()=>{message(await post('/api/estop'));await refresh();});
+$('reset').onclick=()=>act(async()=>{message(await post('/api/session/reset'));await refresh();});
+setInterval(refresh,750);setInterval(()=>{for(const c of cameras){const img=$('cam-'+c.name);if(img)img.src='/api/cameras/'+encodeURIComponent(c.name)+'/preview.jpg?t='+Date.now();}},1000);refresh();
+</script></html>

@@ -1,0 +1,44 @@
+run:
+  name: real_blocks_edl_verifier
+  output_root: ../outputs
+  seed: 7
+  overwrite: false
+
+data:
+  datasets:
+    real_blocks: ../datasets/real_blocks.hdf5
+  selected_suites: [real_blocks]
+  validation_ratio: 0.2
+  split_seed: 7
+  max_action_tokens: auto
+
+model:
+  chunk_encoder: token_attention_pool
+  token_position_encoding: sinusoidal
+  token_embed_dim: 32
+  chunk_embed_dim: 64
+  attention_heads: 1
+  self_attention_layers: 1
+  encoder_dropout: 0.1
+  lstm_hidden_dim: 64
+  lstm_layers: 1
+  lstm_dropout: 0.0
+  head: edl
+
+edl:
+  evidence_activation: softplus
+  kl_weight: 0.001
+  kl_anneal_epochs: 20
+
+loss:
+  class_balance: none
+
+training:
+  device: auto
+  epochs: 200
+  batch_size: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 30
+  num_workers: 0
