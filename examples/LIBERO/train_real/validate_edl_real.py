@@ -133,10 +133,19 @@ def validate_task(task: str, args) -> dict:
         token_lengths = []
         for ep, frame in sample_positions:
             raw = single.get_step_data(ep, frame)
+            raw_state = np.concatenate([raw[key] for key in single.modality_keys["state"]], axis=1).copy()
             transformed = single.transforms(raw)
             sample = single._pack_sample(transformed)
             assert sample["action"].shape == (ACTION_HORIZON, 14)
             assert np.isfinite(sample["action"]).all()
+            if cfg.datasets.vla_data.get("include_state", False):
+                assert sample["state"].shape == (1, 14)
+                state_stats = json.loads((root / "meta/stats.json").read_text())["observation.state"]
+                low, high = np.asarray(state_stats["q01"]), np.asarray(state_stats["q99"])
+                expected_state = np.zeros_like(raw_state)
+                nonconstant = high != low
+                expected_state[:, nonconstant] = 2 * (raw_state[:, nonconstant] - low[nonconstant]) / (high[nonconstant] - low[nonconstant]) - 1
+                np.testing.assert_allclose(sample["state"], np.clip(expected_state, -1, 1), atol=1e-3)
             assert [image.size for image in sample["image"]] == [(224, 224)] * 3
             assert sample["lang"] == episodes[ep]["tasks"][0]
             if ep == len(episodes) - 1 and frame == episodes[-1]["length"] - 1:
@@ -152,6 +161,11 @@ def validate_task(task: str, args) -> dict:
         source_stats = json.loads((root / "meta/stats.json").read_text())["action"]
         np.testing.assert_allclose(export["q01"], source_stats["q01"], rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(export["q99"], source_stats["q99"], rtol=1e-6, atol=1e-6)
+        if cfg.datasets.vla_data.get("include_state", False):
+            state_export = json.loads(stat_path.read_text())[single.tag]["state"]
+            state_source = json.loads((root / "meta/stats.json").read_text())["observation.state"]
+            for key in ("q01", "q99"):
+                np.testing.assert_allclose(state_export[key], state_source[key], rtol=1e-6, atol=1e-6)
         from starVLA.model.tools import FrameworkTools
         # Verify the opt-in continuous deployment path; keep the shared default unchanged.
         normalized = np.tile(np.linspace(-0.8, 0.8, 14), (ACTION_HORIZON, 1))

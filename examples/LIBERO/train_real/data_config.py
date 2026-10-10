@@ -1,12 +1,32 @@
 """Three independent real-robot task mixtures using the existing LeRobot loader."""
 
+import torch
+
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import StateActionToTensor, StateActionTransform
 
 
-ACTION_HORIZON = 15
+ACTION_HORIZON = 30
+
+
+class RealStateTransform(StateActionTransform):
+    """Normalize measured state with its own quantiles for text quantization."""
+
+    def apply(self, data):
+        data = super().apply(data)
+        for key in self.apply_to:
+            if key not in data:
+                continue
+            value = data[key]
+            stats = self.normalization_statistics[key]
+            q01 = torch.as_tensor(stats["q01"], device=value.device, dtype=value.dtype)
+            q99 = torch.as_tensor(stats["q99"], device=value.device, dtype=value.dtype)
+            # A constant state dimension carries no scale information. Do not
+            # leave its raw joint angle in an otherwise normalized vector.
+            data[key] = torch.where(q99 != q01, value, torch.zeros_like(value)).clamp(-1, 1)
+        return data
 
 
 class EDLRealDualArmDataConfig:
@@ -34,10 +54,12 @@ class EDLRealDualArmDataConfig:
 
     def transform(self):
         return ComposedModalityTransform(transforms=[
-            StateActionToTensor(apply_to=self.action_keys),
+            StateActionToTensor(apply_to=self.action_keys + self.state_keys),
             # Match QwenEDL's existing q01/q99 action unnormalization at inference.
             StateActionTransform(apply_to=self.action_keys,
                                  normalization_modes={key: "q99" for key in self.action_keys}),
+            RealStateTransform(apply_to=self.state_keys,
+                               normalization_modes={key: "q99" for key in self.state_keys}),
         ])
 
 

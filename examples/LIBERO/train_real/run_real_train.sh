@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 # Training and wandb must remain independent of a client-side proxy tunnel.
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy WANDB_HTTP_PROXY WANDB_HTTPS_PROXY
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT"
@@ -37,14 +37,14 @@ for arg in "$@"; do
 done
 PYTHON_BIN="${PYTHON:-python}"
 CONFIG="$SCRIPT_DIR/configs/$TASK.yaml"
-RUN_NAME="${RUN_ID:-qwen3fast_edl_real_${TASK}_edl_1e-2}"
+RUN_NAME="${RUN_ID:-qwen3fast_edl_real_${TASK}_edl_1e-2_state}"
 RUN_ROOT="${RUN_ROOT_DIR:-./playground/Checkpoints}"
 if [[ "${RESUME:-0}" == 1 ]]; then OVERRIDES+=(--trainer.is_resume True); fi
 OVERRIDES+=(--run_id "$RUN_NAME" --run_root_dir "$RUN_ROOT")
 
 COMMAND=("$PYTHON_BIN" -m accelerate.commands.launch
     --config_file "${ACCELERATE_CONFIG:-starVLA/config/deepseeds/deepspeed_zero2.yaml}"
-    --num_processes "${NUM_PROCESSES:-1}" --main_process_port "${MAIN_PROCESS_PORT:-$PORT}"
+    --num_processes "${NUM_PROCESSES:-4}" --main_process_port "${MAIN_PROCESS_PORT:-$PORT}"
     "$SCRIPT_DIR/train_edl_real.py" --config_yaml "$CONFIG" "${OVERRIDES[@]}")
 printf 'Task: %s\nConfig: %s\nRun: %s/%s\n' "$TASK" "$CONFIG" "$RUN_ROOT" "$RUN_NAME"
 printf '%q ' "${COMMAND[@]}"; printf '\n'

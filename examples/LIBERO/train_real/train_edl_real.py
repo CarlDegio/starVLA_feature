@@ -65,9 +65,20 @@ def configure_training_memory(model, config):
     return model
 
 
+def finalize_real_training(self, original_finalize):
+    """Keep requested step checkpoints without duplicating the final weights."""
+    if self.config.trainer.get("save_final_model", True):
+        return original_finalize(self)
+    if self.accelerator.is_main_process:
+        import wandb
+        wandb.finish()
+    self.accelerator.wait_for_everyone()
+
+
 def main():
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-                 "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+                 "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+                 "WANDB_HTTP_PROXY", "WANDB_HTTPS_PROXY"):
         os.environ.pop(name, None)
     configure_wandb_auth()
     from omegaconf import OmegaConf
@@ -112,6 +123,8 @@ def main():
             self.model.train(was_training)
 
     trainer.VLATrainer.eval_action_model = evaluate_in_eval_mode
+    finalize = trainer.VLATrainer._finalize_training
+    trainer.VLATrainer._finalize_training = lambda self: finalize_real_training(self, finalize)
     trainer.main(cfg)
 
 

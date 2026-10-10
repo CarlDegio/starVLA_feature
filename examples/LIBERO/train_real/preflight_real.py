@@ -35,10 +35,28 @@ def main():
         from starVLA.dataloader.gr00t_lerobot.datasets import _load_stats_cache
         cached = _load_stats_cache(root / "meta/stats_gr00t.json", {"mode": "abs"}, invalidate_legacy=False)
         stats = json.loads((root / "meta/stats.json").read_text())
-        if cached is None or any(cached["action"][key] != stats["action"][key] for key in ("q01", "q99", "mean")):
+        columns = ["action"]
+        if cfg.datasets.vla_data.get("include_state", False):
+            columns.append("observation.state")
+        if cached is None or any(
+                cached.get(column, {}).get(key) != stats[column][key]
+                for column in columns for key in ("q01", "q99", "mean")):
             raise ValueError("Real-data normalization cache missing or changed; rerun the conversion command to restore it")
     if cfg.framework.name != "QwenEDL" or cfg.framework.action_model.action_dim != 14:
         raise ValueError("Real datasets require QwenEDL with action_dim=14")
+    include_state = cfg.datasets.vla_data.get("include_state", False)
+    state_input = cfg.framework.get("state_input", {})
+    if bool(include_state) != bool(state_input.get("enabled", False)):
+        raise ValueError("include_state and framework.state_input.enabled must be enabled/disabled together")
+    if include_state:
+        expected_names = [*[f"left_joint_{i}" for i in range(6)],
+                          *[f"right_joint_{i}" for i in range(6)], "left_gripper", "right_gripper"]
+        feature = info["features"]["observation.state"]
+        if (cfg.framework.action_model.state_dim != 14 or feature["shape"] != [14]
+                or feature["names"] != expected_names):
+            raise ValueError("State must use 14D left joints/right joints/left gripper/right gripper order")
+        if int(state_input.get("num_bins", 256)) < 2:
+            raise ValueError("State input requires num_bins >= 2")
     from examples.LIBERO.train_real.data_config import ACTION_HORIZON
     if (cfg.framework.action_model.action_horizon != ACTION_HORIZON
             or cfg.framework.action_model.future_action_window_size != ACTION_HORIZON - 1

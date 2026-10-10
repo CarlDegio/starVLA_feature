@@ -14,8 +14,8 @@
 
 - 三路视频按 **top、left、right** 顺序使用，保存为 **320×240、30 FPS、H.264**。现有加载器继续将帧缩放成 **224×224** 再交给 Qwen 图像处理器；没有修改模型或图像预处理实现。
 - 动作和状态都是 14 维，顺序为 **左臂 6 个关节、右臂 6 个关节、左夹爪、右夹爪**。保留源 `action-*.npy` 中记录的控制目标，不做差分；默认 `action_mode: abs`。夹爪保留连续值。
-- 预测窗口为 15 步（当前步及后续 14 步动作，30 Hz 下约 0.5 秒），只输入当前时刻三路图像，不输入历史图像。窗口在加载时构造，无需重转视频或 Parquet。动作按各任务自身的 `q01/q99` 归一化，统计维度顺序与训练动作完全一致。后续部署 real 子集时，应按对应模型保存的统计量与训练变换逆转归一化，保持全部 14 维连续；本次只准备数据和训练方案，未修改部署行为。
-- 原数据中的机器人状态仍保存，当前 QwenEDL 训练输入使用图像与任务指令，`include_state: false`。
+- 预测窗口为 30 步（当前步及后续 29 步动作，即 `action_t` 到 `action_{t+29}`，30 Hz 下约 1 秒），只输入当前时刻三路图像与 state，不输入历史图像或未来 state。窗口在加载时构造，无需重转视频或 Parquet；轨迹末尾不足 30 步时重复最后一个动作补齐。动作按各任务自身的 `q01/q99` 归一化，统计维度顺序与训练动作完全一致。后续部署 real 子集时，应按对应模型保存的统计量与训练变换逆转归一化，保持全部 14 维连续；本次只准备数据和训练方案，未修改部署行为。
+- QwenEDL 真机训练输入使用三路图像、任务指令及当前帧 14 维机器人状态，`include_state: true`。状态顺序与动作相同：左臂 6 关节、右臂 6 关节、左夹爪、右夹爪。
 - MP4 与数组按原始帧索引对应，训练时间戳为 `frame_index / 30`。各相机原始毫秒时间戳另存于 `observation.camera_timestamp_ms.*`，不据此推断控制时刻或重新同步轨迹。
 - 原始 `metadata.json` 的任务名如 `task2` 不够描述动作，默认使用下表指令。可通过 `--instruction-json` 传入 `{ "任务目录名": "具体任务指令" }`。已完成转换可用 `--update-instructions-only` 更新指令；其他转换设置的更改仍需新的输出目录。
 
@@ -115,7 +115,7 @@ bash examples/LIBERO/train_real/convert_edl_real.sh --output-root playground/Dat
 python examples/LIBERO/train_real/validate_edl_real.py
 ```
 
-在安装了仓库数据加载依赖的环境中，额外检查现有训练加载器、224×224 图像、15×14 动作窗口、轨迹末尾填充、FAST 编码/解码与部署统计顺序：
+在安装了仓库数据加载依赖的环境中，额外检查现有训练加载器、224×224 图像、30×14 动作窗口、轨迹末尾填充、FAST 编码/解码与部署统计顺序：
 
 ```bash
 python examples/LIBERO/train_real/validate_edl_real.py --sample-training
@@ -127,15 +127,39 @@ python examples/LIBERO/train_real/validate_edl_real.py --sample-training
 
 `configs/` 下每个任务有自己的 YAML，分别指定 `data_mix: edl_real_<任务名>` 和独立 `run_id`。注册定义在本目录 `data_config.py`，由 LIBERO 原有 `train_files/data_registry/data_config.py` 导入。
 
+### 当前帧 joint/gripper state 输入
+
+三个真机 YAML 同时启用 `datasets.vla_data.include_state: true` 和 `framework.state_input.enabled: true`，`framework.action_model.state_dim: 14`。加载器只取当前帧（`delta_indices=[0]`），输出 `(1, 14)`，不使用未来状态。14 维顺序是 `[left_joint_0..5, right_joint_0..5, left_gripper, right_gripper]`。
+
+state 使用本任务的 `observation.state` 统计量，而非 action 统计量，逐维计算 `2 * (state - q01) / (q99 - q01) - 1`，截断到 `[-1, 1]`；`q01 == q99` 的常量维设为 0。复用现有 Qwen 文本输入方式：归一化 state 离散为 256 档，作为 `[STATE] <14 个档位> [ACTION]` 加入指令。训练 forward 和训练期间的动作评估/预测共用此逻辑，state 不作为动作预测标签，不新增 state encoder 或模型权重。
+
+QwenEDL 的 state 开关默认关闭，LIBERO 的 YAML、脚本和输入保持原样。新的真机默认 run_id 带 `_state` 后缀，避免混用原有不含 state 的实验。做无 state 对照时，需同时覆盖 `--datasets.vla_data.include_state false --framework.state_input.enabled false`，并使用独立 `RUN_ID`。
+
+已经转换的数据包含 state 及其统计量，无需重新转换。`preflight_real.py` 检查 state 配置、维度顺序与统计缓存，`validate_edl_real.py --sample-training` 额外检查归一化数值及导出 state 统计。部署这类新模型时也必须提供相同顺序的当前实测 state，并按 checkpoint 的 state 统计与训练变换归一化后传给 QwenEDL；目前共享 policy server 仅自动处理动作反归一化，不会替客户端归一化 state。
+
+验证：
+
+```bash
+python -m unittest discover -s examples/LIBERO/train_real -p test_state_input.py
+```
+
+此前在 15 步窗口下，本机已用 `playground/Datasets/edl_real` 的三个任务（285 条轨迹、208,406 帧）完成预检查，并逐任务抽取起始、中间、末尾帧，共 9 个样本，核对当前 state、独立归一化统计、三路 224×224 图像及 15×14 动作窗口。每个任务的中间样本均通过 Qwen3-VL-4B + FlashAttention 2 前向/反向，loss 和 embedding 梯度有限，单样本峰值显存 18.53 GiB。记录在 `playground/.env_setup/starvla_20261009/real-state-verification.json`；这验证训练链路，不代表训练后的真机成功率。
+
+此前在 15 步窗口下，在当前 4 张 B200 上，使用积木真实数据、每卡 10 个 worker、bf16、FlashAttention 2、ZeRO-2、关闭激活检查点、梯度累积 1，分别对每卡 BS 16 和 BS 32 做了 5 步前向/反向及 AdamW 更新短测，均正常退出且未保存 checkpoint。BS 16 每卡张量显存峰值为 68.7–69.3 GiB，`nvidia-smi`（含缓存和通信开销）峰值为 88.3–93.8 GiB；BS 32 分别为 115.2–116.0 GiB 和 135.3–157.7 GiB。当前默认 BS 32、4 卡全局 BS 128；学习率不自动扩大。记录在 `playground/.env_setup/starvla_20261009/bs16-memory.json` 和 `bs32-memory.json`，实际显存会随 batch 的动作 token 长度变化，短测不代表完整训练全程的最大值。
+
+当前 30 步窗口已逐任务检查起始、中间、末尾帧，共 9 个真实样本，确认动作从当前帧开始、末尾重复最后动作补齐、FAST 解码形状为 `(1, 30, 14)`，state 仍只取当前帧。记录在 `playground/.env_setup/starvla_20261009/h30-data-verification.json`。使用相同 4 卡、每卡 BS 32 设置又完成 5 步训练更新并正常退出，每卡张量显存峰值为 119.4–120.1 GiB，`nvidia-smi` 峰值为 161.2–166.5 GiB。排除首步初始化后，计算更新平均约 1.15 秒/步（不含等待读取 batch、评估和保存）；仅为短测。记录在 `playground/.env_setup/starvla_20261009/bs32-h30-memory.json`。数据文件和归一化统计不依赖窗口长度，无需重新转换。
+
 参考 `playground/Checkpoints/qwen3fast_libero_all_edl_1e-2/config.full.yaml`：
 
-- 同一 `Qwen3-VL-4B-Instruct-Action` 基座与 FAST tokenizer，保持现有 QwenEDL 模型实现。
-- 30,000 steps、5,000 warmup、每设备 batch 8、**不累积梯度**（`gradient_accumulation_steps: 1`）、每 15,000 steps 保存。每次读取一个 batch 就更新一次；多卡有效 batch 为 `8 × 进程数`。
-- VLM 学习率 `1e-5`、基础学习率 `2.5e-5`、cosine scheduler、AdamW；不冻结 VLM。
-- 动作维度改为真实双臂所需的 14，预测窗口改为 15 步（`action_horizon: 15`、`future_action_window_size: 14`、`past_action_window_size: 0`）。生成预算保持 256 tokens。
+- 同一 `Qwen3-VL-4B-Instruct-Action` 基座与 FAST tokenizer，使用 QwenEDL 的显式 state 输入开关；不增加模型参数。
+- 30,000 steps、5,000 warmup、每设备 batch 32、**不累积梯度**（`gradient_accumulation_steps: 1`）、每 15,000 steps 保存。每次读取一个 batch 就更新一次；默认 4 卡，全局 batch 为 128。
+- 真机默认 `trainer.save_final_model: false`，只保存 `checkpoints/steps_15000_pytorch_model.pt` 和 `steps_30000_pytorch_model.pt`；结束时不重复保存 `final_model`。专用入口仍完成 WandB flush 和各进程同步，原 LIBERO 入口保持原样。
+- 每个训练进程使用 10 个 DataLoader worker 子进程（`datasets.vla_data.num_workers: 10`），4 卡共 40 个 worker；每个 worker 预取一个 batch。共享加载器在未指定该参数时仍使用 4 个 worker，LIBERO 原配置不受影响。
+- VLM 学习率 `1e-5`、基础学习率 `2.5e-5`、FAST 模块配置学习率 `1e-4`，不因 batch 或卡数变化自动缩放。当前 FAST tokenizer 无可训练参数，实际更新的是 VLM 参数。AdamW 配合 `cosine_with_min_lr`：前 5,000 步线性 warmup，随后余弦衰减，到第 30,000 步降至 `1e-6`；不冻结 VLM。
+- 动作维度为真实双臂所需的 14，预测窗口为 30 步（`action_horizon: 30`、`future_action_window_size: 29`、`past_action_window_size: 0`）。生成预算保持 256 tokens。
 - `framework.edl` 显式记录 `digamma`、top-k 25、KL 权重 **0.01**、annealing 15,000、`softplus`。
 
-参考实验的 YAML 未记录 EDL loss 参数，当前 `QwenEDL.py` 内硬编码 KL 权重为 0。专用 `train_edl_real.py` 入口在构建后设置已有 loss 属性，让新 YAML 的 `0.01` 真正生效；未改动模型类、参数键或原 LIBERO 训练入口。运行这套 YAML 时应使用专用入口，直接交给原 `train_starvla.py` 不会应用新 EDL loss 参数。
+参考实验的 YAML 未记录 EDL loss 参数，当前 `QwenEDL.py` 内硬编码 KL 权重为 0。专用 `train_edl_real.py` 入口在构建后设置已有 loss 属性，让新 YAML 的 `0.01` 真正生效；EDL loss 适配不改动模型参数键或原 LIBERO 训练入口。运行这套 YAML 时应使用专用入口，直接交给原 `train_starvla.py` 不会应用新 EDL loss 参数。
 
 专用入口在导入共享 trainer 前强制将 Accelerator 梯度累积设为 1，与共享 DeepSpeed 配置的 1 一致。前置检查拒绝其他累积值；自定义 DeepSpeed 配置若不为 1 或 `auto`，也会在启动时拒绝。
 
@@ -145,13 +169,13 @@ python examples/LIBERO/train_real/validate_edl_real.py --sample-training
 
 旧的公共 `FrameworkTools.unnormalize_actions` 保持原样，默认仍将索引 6 当夹爪二值化。如果后续 real 子集的部署代码选用这个旧助手，可显式传 `gripper_channel_idx=-1` 跳过二值化，并按选定的 `q01/q99` 和 `mask` 恢复连续动作；它原有的 `[-1, 1]` 截断规则仍适用。本次未改任何现有部署脚本。
 
-默认三个模型分别从同一基础 VLM 初始化，未自动加载 LIBERO 实验的已训练权重，也不会立即启动训练。
+默认三个模型分别从同一基础 VLM 初始化，未自动加载 LIBERO 实验的已训练权重。
 
 三个任务各用自己的 `data_mix`，每个 mixture 只包含对应任务的数据；每次启动创建独立模型、独立 checkpoint 目录和独立 wandb run。`all` 是依次启动三次独立训练，不会把任务混在一个模型中训练，也不会自动继承前一个任务的模型权重。
 
 wandb 项目为 `starVLA_EDL_Real`，entity 为 `carldegio`，run 名为各任务的 `run_id`。专用训练入口优先使用已有的 `WANDB_API_KEY` 环境变量，否则读取仓库根目录的 `.wandb_api_key`（已被 `.gitignore` 忽略，文件权限为 600）；可用 `WANDB_API_KEY_FILE` 指定其他 key 文件。凭证只放入进程环境，不写入训练 YAML、脚本副本或模型配置。
 
-启动脚本和专用 Python 入口均清除大小写的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`，训练及 wandb 使用服务器直连，不依赖客户端的代理隧道。tmux 可在客户端断开或关机后继续运行；训练服务器本身关机则不能继续执行。
+启动脚本和专用 Python 入口均清除大小写的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`，以及 `WANDB_HTTP_PROXY`、`WANDB_HTTPS_PROXY`，训练及 wandb 使用服务器直连，不依赖客户端的代理隧道。tmux 可在客户端断开或关机后继续运行；训练服务器本身关机则不能继续执行。
 
 在已有 StarVLA 训练环境中分别执行：
 
@@ -167,7 +191,7 @@ bash examples/LIBERO/train_real/run_real_train.sh place_the_slippers_on_the_shoe
 bash examples/LIBERO/train_real/run_real_train.sh all
 ```
 
-默认每次使用一个进程。多卡、指定可见设备、改训练步数或先打印命令：
+当前机器有 4 张 B200，默认每次使用 4 个训练进程，每卡 batch 32；`NUM_PROCESSES` 可覆盖卡数。指定可见设备、改训练步数或先打印命令：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 NUM_PROCESSES=2 bash examples/LIBERO/train_real/run_real_train.sh classification_the_blocks
@@ -175,9 +199,36 @@ bash examples/LIBERO/train_real/run_real_train.sh all --dry-run
 bash examples/LIBERO/train_real/run_real_train.sh classification_the_blocks --trainer.max_train_steps 10000 --trainer.num_warmup_steps 1000
 ```
 
-模型分别保存到 `playground/Checkpoints/qwen3fast_edl_real_<任务名>_edl_1e-2/`。已有权重的目录默认拒绝覆盖；设置不同 `RUN_ID` 建立新实验，或用 `RESUME=1` 沿用仓库原有模型权重和步数恢复逻辑（不表示完整恢复 optimizer/scheduler 状态）。`RUN_ROOT_DIR`、`MAIN_PROCESS_PORT`、`ACCELERATE_CONFIG`、`PYTHON` 也可通过环境变量设置。
+模型分别保存到 `playground/Checkpoints/qwen3fast_edl_real_<任务名>_edl_1e-2_state/`。已有权重的目录默认拒绝覆盖；设置不同 `RUN_ID` 建立新实验，或用 `RESUME=1` 沿用仓库原有模型权重和步数恢复逻辑（不表示完整恢复 optimizer/scheduler 状态）。`RUN_ROOT_DIR`、`MAIN_PROCESS_PORT`、`ACCELERATE_CONFIG`、`PYTHON` 也可通过环境变量设置。
 
-## 当前服务器的单机 8 卡作业
+## 已取消的三任务队列（2026-10-10）
+
+原 tmux `edl_real_state_h30_train_4gpu` 的积木、插管、拖鞋三任务队列已根据用户要求取消。积木停止在约第 1,417 步，尚未保存 checkpoint；插管、拖鞋还未启动。原日志、配置快照和 WandB 记录保留，旧队列不会自动继续，四个训练进程及其数据 worker 已退出。
+
+队列脚本、源码和配置快照、日志位于 `playground/Checkpoints/.train_tasks/real_state_h30_bs32_4gpu_20261010/`。`status` 记录当前任务，`completed_tasks` 在任务正常退出并确认两个 checkpoint 存在后追加；任一任务失败即停止队列。
+
+```bash
+cat playground/Checkpoints/.train_tasks/real_state_h30_bs32_4gpu_20261010/status
+tail -f playground/Checkpoints/.train_tasks/real_state_h30_bs32_4gpu_20261010/classification_the_blocks.log
+```
+
+## 当前拖鞋任务 KL 对比队列（2026-10-10）
+
+tmux `edl_real_slippers_kl_compare_4gpu` 按顺序运行拖鞋任务的两个独立实验：`framework.edl.kl_weight=1e-2`，然后 `1e-3`。对应 run_id 为 `qwen3fast_edl_real_place_the_slippers_on_the_shoe_rack_edl_1e-2_state` 和 `qwen3fast_edl_real_place_the_slippers_on_the_shoe_rack_edl_1e-3_state`。两个实验从相同基座重新初始化、seed 42，除 KL 权重和输出名称外配置完全一致；保持同一拖鞋数据、30 步动作窗口、14 维当前 state、4 卡、每卡 BS 32、10 个 worker、VLM 峰值学习率 `1e-5`、15,000 步 KL annealing 和不累积梯度。
+
+每个实验训练 30,000 步，仅保存 15,000 与 30,000 步 checkpoint。WandB 在 `carldegio/starVLA_EDL_Real` 在线记录，启动时清除代理变量。任一实验失败即停止，不继续下一个。
+
+队列脚本、两个解析后的实验 YAML、源码快照和日志在 `playground/Checkpoints/.train_tasks/slippers_kl_compare_h30_bs32_4gpu_20261010/`。`status` 记录当前实验，`completed_experiments` 在训练结束并确认两个 checkpoint 和实际 KL 配置后追加。正式训练以各模型目录的 `config.full.yaml` 为准；第二个实验通过启动参数覆盖默认拖鞋 YAML 的 KL 权重。
+
+```bash
+tmux attach -t edl_real_slippers_kl_compare_4gpu
+cat playground/Checkpoints/.train_tasks/slippers_kl_compare_h30_bs32_4gpu_20261010/status
+tail -f playground/Checkpoints/.train_tasks/slippers_kl_compare_h30_bs32_4gpu_20261010/slippers_kl_1e-2.log
+```
+
+## 历史服务器的单机 8 卡作业（2026-10-02）
+
+以下为原服务器的环境、BS 8 配置与运行记录，当前机器的默认配置以上面的 4 卡、每卡 BS 32、10 个 worker 为准。
 
 已准备独立环境 `playground/.venvs/edl-real`，复用 RoboTwin 环境的 PyTorch 2.7.1/CUDA 12.8；训练依赖安装在独立环境中，不修改 RoboTwin。专用 CUDA 编译工具链在 `playground/.tools/cuda`。基础训练依赖为 Transformers 4.57.0、Accelerate 1.5.2、DeepSpeed 0.16.9、FlashAttention 2.8.3。FlashAttention 使用与 PyTorch 2.7、Python 3.10、CXX11 ABI 匹配的官方 wheel，已在 H20 上通过 bf16 前向/反向测试。真实训练前置检查要求已安装请求的 FlashAttention，入口打印实际 attention backend。
 

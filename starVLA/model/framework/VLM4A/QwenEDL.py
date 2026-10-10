@@ -36,7 +36,7 @@ logger = initialize_overwatch(__name__)
 IGNORE_INDEX = -100
 
 from starVLA.model.framework.base_framework import baseframework
-from starVLA.model.framework.share_tools import merge_framework_config
+from starVLA.model.framework.share_tools import add_discretized_state_to_instruction, merge_framework_config
 from starVLA.model.modules.action_model.fast_ActionHeader import get_action_model
 from starVLA.model.modules.vlm import get_vlm_model
 
@@ -82,6 +82,9 @@ class QwenEDLDefaultConfig:
         }
     )
 
+    # Explicit opt-in; existing LIBERO configurations keep image/text inputs.
+    state_input: dict = field(default_factory=lambda: {"enabled": False, "num_bins": 256})
+
 
 @FRAMEWORK_REGISTRY.register("QwenEDL")
 class Qwenvl_EDL(baseframework):
@@ -93,7 +96,8 @@ class Qwenvl_EDL(baseframework):
       - FAST tokenizer for discretized / symbolized continuous action encoding
       - Evidential next-token prediction over top-k full-vocabulary candidates
 
-    Focus: Predict future continuous actions conditioned on images + instruction.
+    Focus: Predict future continuous actions conditioned on images + instruction,
+    with optional normalized current-state text for real-robot experiments.
     """
 
     def __init__(
@@ -152,6 +156,7 @@ class Qwenvl_EDL(baseframework):
                 - image: List[PIL.Image] (multi-view)
                 - lang: str instruction
                 - action: np.ndarray or list shaped [T, action_dim]
+                - state: normalized [1, state_dim] vector when state_input is enabled
             **kwargs: Reserved.
 
         Returns:
@@ -159,7 +164,7 @@ class Qwenvl_EDL(baseframework):
                 action_loss (torch.Tensor): Scalar evidential action-token loss.
         """
         batch_images = [example["image"] for example in examples]  #  [B, [PIL]]
-        instructions = [example["lang"] for example in examples]  # [B, str]
+        instructions = self._build_instructions(examples)
         actions = [example["action"] for example in examples]  # label [B, len, 7]
 
         # step 0: map_raw_action_to_vlm_action
@@ -222,7 +227,7 @@ class Qwenvl_EDL(baseframework):
         if type(examples) is not list:
             examples = [examples]
         batch_images = [to_pil_preserve(example["image"]) for example in examples]  #  [B，[PLT]]
-        instructions = [example["lang"] for example in examples]  # [B, str]
+        instructions = self._build_instructions(examples)
 
         # train_obs_image_size = getattr(self.config.datasets.vla_data, "obs_image_size", None)
         # if train_obs_image_size:
@@ -276,6 +281,35 @@ class Qwenvl_EDL(baseframework):
         if kwargs.get("return_edl_details", False):
             result.update(self._generation_edl_details(generated))
         return result
+
+    def _build_instructions(self, examples: List[dict]) -> List[str]:
+        """Use the same normalized current-state text in training and generation.
+
+        Normalization belongs to the dataset/deployment transforms. This method
+        consumes a normalized (1, state_dim) vector, never raw robot joint angles.
+        """
+        instructions = [example["lang"] for example in examples]
+        options = self.config.framework.get("state_input", {})
+        if not options.get("enabled", False):
+            return instructions
+        state_dim = int(self.config.framework.action_model.state_dim)
+        num_bins = int(options.get("num_bins", 256))
+        if state_dim < 1 or num_bins < 2:
+            raise ValueError("State input requires positive state_dim and num_bins >= 2")
+        states = []
+        for example in examples:
+            if "state" not in example:
+                raise ValueError("QwenEDL state_input is enabled but the example has no normalized state")
+            value = example["state"]
+            if isinstance(value, torch.Tensor):
+                value = value.detach().cpu().numpy()
+            state = np.asarray(value, dtype=np.float32)
+            if state.shape != (1, state_dim) or not np.isfinite(state).all():
+                raise ValueError(f"Expected finite normalized state with shape (1, {state_dim}); got {state.shape}")
+            if np.any(np.abs(state) > 1):
+                raise ValueError("QwenEDL state must be normalized and clipped to [-1, 1] before model input")
+            states.append(state)
+        return add_discretized_state_to_instruction(instructions, states, num_bins=num_bins)
 
     def _generation_edl_details(self, generated) -> dict:
         """Optional replayable action-vocabulary top-k Dirichlet parameters.
