@@ -5,7 +5,7 @@
 body{font:16px system-ui;background:#111820;color:#e4edf5;max-width:1120px;margin:32px auto;padding:0 20px}h1{font-size:26px}fieldset{border:1px solid #3b4c5a;border-radius:10px;margin:16px 0;padding:16px}label{display:inline-flex;flex-direction:column;gap:6px;margin:6px}input,button{font:inherit;padding:10px;border-radius:6px;border:1px solid #587080}input{background:#1c2935;color:white}button{cursor:pointer;background:#dceaf4;color:#142333;margin:5px}button:disabled{opacity:.45;cursor:default}.primary{background:#61d8b0}.danger{background:#ff7373}.views{display:flex;gap:12px}.views figure{width:33%;margin:0}.views img{width:100%;background:#263442;aspect-ratio:4/3;object-fit:contain}pre{white-space:pre-wrap;word-break:break-all}.muted{color:#9eb3c5}.error{color:#ff9f9f}
 </style>
 <h1>StarVLA · 单次执行与 EDL 采集</h1>
-<p>一次触发只推理并执行一个 horizon（15 步），完成后等待。多次触发属于同一条 episode。</p>
+<p>一次触发只推理并执行一个 horizon（按服务配置，默认执行前 15 步），完成后等待。多次触发属于同一条 episode。</p>
 <fieldset id="settings"><legend>本轮设置（首个 horizon 开始后固定）</legend>
 <label>模型 Host<input id="host" value="127.0.0.1"></label><label>端口<input id="port" type="number" value="8002"></label>
 <label>关节限速 rad/s<input id="speed" type="number" min="0.01" step="0.1" value="0.3"></label>

@@ -13,6 +13,23 @@ from examples.LIBERO.edl_pred.dataset import index_suite_episodes, TrajectoryDat
 
 
 class ExportTests(unittest.TestCase):
+    def test_30_step_chunk_metadata_and_actions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            policy, backend = Policy(), Backend()
+            policy.metadata = {**policy.metadata, "horizon": 30, "uses_state": True}
+            recorder = EpisodeRecorder(folder, policy.metadata, collection_id="test", seed_namespace="mock", mock=True)
+            controller = ManualChunkController(policy, backend, recorder, "test")
+            controller.control_hz = 100000
+            controller.execute_once()
+            recorder.finish(1)
+            output = Path(folder) / "data.hdf5"
+            export_dataset(folder, output, task="blocks", collection_id="test", seed_namespace="mock", allow_mock=True)
+            with h5py.File(output) as file:
+                self.assertEqual(file.attrs["action_chunk_size"], 30)
+                episode = file["episodes/task_000_episode_0000"]
+                self.assertEqual(episode.attrs["executed_steps"], 30)
+                self.assertEqual(episode["real_chunks/000000/actions"].shape, (30, 14))
+
     def test_roundtrip_into_existing_verifier_and_recompute(self):
         with tempfile.TemporaryDirectory() as folder:
             for label in (0, 1):

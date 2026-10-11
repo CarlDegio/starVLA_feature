@@ -27,7 +27,7 @@ class Policy:
         alpha = np.tile(np.array([2, 3], dtype=np.float32), (1, 3, 1))
         strength = alpha.sum(-1, keepdims=True)
         au = ((alpha / strength) * (digamma(strength + 1) - digamma(alpha + 1))).sum(-1) / np.log(2)
-        return {"actions": np.full((15, 14), .02, dtype=np.float32),
+        return {"actions": np.full((self.metadata["horizon"], 14), .02, dtype=np.float32),
                 "model_images": {role: np.zeros((224, 224, 3), dtype=np.uint8) for role in ("top", "left", "right")},
                 "diagnostics": {"action_token_topk_alpha": alpha,
                     "action_token_topk_ids": np.tile([2, 3], (1, 3, 1)),

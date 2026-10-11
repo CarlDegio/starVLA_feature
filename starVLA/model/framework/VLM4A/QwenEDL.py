@@ -250,7 +250,11 @@ class Qwenvl_EDL(baseframework):
         generated_ids = generated.sequences
         batch_vlm_action_token_ids = self._extract_action_token_ids(generated_ids)
         batch_fast_action_token_idx = self._decode_action_tokens(batch_vlm_action_token_ids)
-        normalized_actions = self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
+        # Real inference may opt into strict/experimental decoding. Training and
+        # standard LIBERO inference keep the original tokenizer path.
+        decoder = kwargs.get("fast_action_decoder")
+        normalized_actions = (self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
+                              if decoder is None else decoder(self.action_model.fast_tokenizer, batch_fast_action_token_idx))
 
         (
             token_uncertainty,

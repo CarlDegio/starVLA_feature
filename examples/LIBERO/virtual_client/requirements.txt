@@ -1,0 +1,5 @@
+# Add to the existing starvla inference environment.
+pyarrow>=14,<24
+matplotlib>=3.8,<3.11
+# PyAV is already installed with the inference video dependencies.
+av>=12,<17

@@ -101,9 +101,9 @@ class ManualEpisodeSession:
                 if self.session._estop_generation != self.generation or self.session._estopped:
                     raise RuntimeError("模型连接期间发生急停，启动已取消")
                 meta = self.policy.metadata
-                if (meta.get("horizon") != 15 or meta.get("control_hz") != 30 or meta.get("action_stride") != 1
+                if (meta.get("horizon") not in (15, 30) or meta.get("control_hz") != 30 or meta.get("action_stride") != 1
                         or not meta.get("edl_details_available")):
-                    raise ValueError("需要更新后的 QwenEDL real server（15 步、30 Hz、支持 top-k alpha 记录）")
+                    raise ValueError("需要 QwenEDL real server（15 或 30 步、30 Hz、支持 top-k alpha 记录）")
                 self.session.cfg = cfg
                 self.recorder = EpisodeRecorder(self.output, meta, collection_id=collection_id,
                                                seed_namespace=seed_namespace, mock=self.session.mock)

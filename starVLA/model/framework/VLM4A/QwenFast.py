@@ -255,7 +255,10 @@ class Qwenvl_Fast(baseframework):
         # --- map index to fast tokenizer index space ---
         batch_fast_action_token_idx = self._decode_action_tokens(batch_vlm_action_token_ids)
         # --- decode fast tokenizer index to action semantic ---
-        normalized_actions = self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
+        # Shared real-policy adapter supports both FAST-based frameworks.
+        decoder = kwargs.get("fast_action_decoder")
+        normalized_actions = (self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
+                              if decoder is None else decoder(self.action_model.fast_tokenizer, batch_fast_action_token_idx))
 
         result = {"normalized_actions": normalized_actions}
         if generated is not None:

@@ -36,6 +36,30 @@ def policy():
 
 
 class AdapterTests(unittest.TestCase):
+    def test_execute_prefix_preserves_full_decode_and_evidence(self):
+        wrapper = StubWrapper()
+        wrapper.metadata = {**wrapper.metadata, "action_chunk_size": 30}
+        full = np.arange(30 * 14, dtype=np.float32).reshape(1, 30, 14)
+        tokens = np.arange(23)[None]
+        wrapper.predict_action = lambda **kwargs: {"actions": full, "action_token_ids": tokens}
+        adapter = YAMStarVLAPolicy(wrapper, task="slippers", default_prompt="test", execution_horizon=15)
+        result = adapter.infer({**observation(), "return_edl_details": True})
+        order = [0, 1, 2, 3, 4, 5, 12, 6, 7, 8, 9, 10, 11, 13]
+        np.testing.assert_array_equal(result["actions"], full[0, :15][:, order])
+        np.testing.assert_array_equal(result["diagnostics"]["full_model_actions"], full[0][:, order])
+        np.testing.assert_array_equal(result["diagnostics"]["action_token_ids"], tokens)
+        for key in ("horizon", "execution_horizon", "action_chunk_size", "open_loop_horizon"):
+            self.assertEqual(adapter.metadata[key], 15)
+        self.assertEqual(adapter.metadata["model_horizon"], 30)
+        self.assertEqual(wrapper.metadata["action_chunk_size"], 30)
+        for invalid in (0, 31, True):
+            with self.assertRaises(ValueError):
+                YAMStarVLAPolicy(wrapper, task="slippers", default_prompt="test", execution_horizon=invalid)
+        # A malformed model output cannot bypass full-horizon validation.
+        wrapper.predict_action = lambda **kwargs: {"actions": full[:, :15]}
+        with self.assertRaises(ValueError):
+            adapter.infer(observation())
+
     def test_camera_and_joint_order_and_diagnostics(self):
         adapter = policy()
         result = adapter.infer(observation())

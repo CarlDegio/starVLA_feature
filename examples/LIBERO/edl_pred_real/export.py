@@ -81,7 +81,8 @@ def export_dataset(root, output, *, task, collection_id, seed_namespace, allow_m
     try:
         metadata = {"task_suite": f"real_{task}", "collection_id": collection_id,
                     "seed_namespace": seed_namespace, "checkpoint": checkpoint,
-                    "action_chunk_size": 15, "control_hz": 30.0, "real_schema_version": "1.0",
+                    "action_chunk_size": episodes[0][0]["server_metadata"]["horizon"],
+                    "control_hz": episodes[0][0]["server_metadata"]["control_hz"], "real_schema_version": "1.0",
                     "contains_mock": any(e[0]["mock"] for e in episodes), "skipped": skipped,
                     "source_root": str(root.resolve())}
         with LiberoUncertaintyDatasetWriter(temporary, metadata) as writer:

@@ -351,6 +351,22 @@ class PolicyNormProcessor:
         return self._transform
 
     # ------------------------------------------------------------------
+    def apply_state(self, state: np.ndarray) -> np.ndarray:
+        """Normalize raw (T, D) state in state_keys order with training transforms."""
+        state = np.asarray(state, dtype=np.float32)
+        dimension = sum(self._state_key_dims[k] for k in self._state_keys)
+        if state.ndim != 2 or state.shape[1] != dimension or not np.isfinite(state).all():
+            raise ValueError(f"Expected finite state (T, {dimension}); got {state.shape}")
+        data, cursor = {}, 0
+        for key in self._state_keys:
+            width = self._state_key_dims[key]
+            data[key] = state[:, cursor:cursor + width].copy()
+            cursor += width
+        out = self._transform(data)
+        return np.concatenate([out[key].detach().cpu().numpy() if isinstance(out[key], torch.Tensor)
+                               else np.asarray(out[key]) for key in self._state_keys], axis=-1)
+
+    # ------------------------------------------------------------------
     # Inverse path (model output → env action)
     # ------------------------------------------------------------------
     def unapply_actions(self, normalized_actions: np.ndarray) -> np.ndarray:

@@ -1,7 +1,10 @@
 # 真机单次执行与 EDL 采集
 
-单次执行由 **YAM 客户端**控制。模型 server 常驻，收到一次请求就返回一个 15 步 chunk；
-GUI/终端每次人工触发最多执行这 15 步，然后等待，不会自动重推理。
+单次执行由 **YAM 客户端**控制。模型 server 常驻，收到一次请求就返回一个 chunk；
+GUI/终端跟随服务返回的 horizon，每次人工触发最多执行一个 chunk，然后等待，不会自动重推理。
+旧模型预测 15 步；新 slippers state 模型预测 30 步。服务默认仅返回前 15 步、30 Hz（标称执行窗口 0.5 秒）。
+可用服务参数 `--execution-horizon 30` 恢复完整 30 步输出。real server 默认对长度错误截取完整 DCT 系数行后解码，不补零；含 U+FFFD 或不足执行步数时明确报错，不发动作。
+EDL 诊断对应完整模型预测；详细记录保留 `diagnostic__full_model_actions`，不能将 token 不确定性直接当作前 15 步的不确定性。
 记录也保存在客户端，因为客户端知道输入、预测、实际发送情况及人工 episode 标签。
 server 负责计算 EDL 诊断，可选返回 top-k Dirichlet 参数，不判断真实任务成败。
 
@@ -14,6 +17,13 @@ cd /home/tiancai/liuzihao/starVLA_feature
 ./policy_server_real.zsh serve --task blocks
 # tubes / slippers 为另两个任务。
 ```
+
+新上传的带 state 拖鞋模型使用 `./policy_server_real.zsh serve --task slippers`，
+默认加载 `qwen3fast_edl_real_place_the_slippers_on_the_shoe_rack_edl_1e-2_state/checkpoints/steps_30000_pytorch_model.pt`。
+客户端发原始关节/夹爪 state；服务端重排并按 checkpoint 的 state q01/q99 归一化、
+常量维度归零、裁剪 [-1,1]，匹配训练 float16 精度后交给 QwenEDL 编码 256 档 state 文本。
+握手应显示 `uses_state=true, model_horizon=30, horizon=15`。旧模型不额外添加 state，`--ckpt` 可显式选旧权重。
+切换时先结束并标注当前 episode，再由操作者重启模型 server 和 GUI；单次动作长度及保存元数据均跟随新模型。
 
 终端 B，启动手动 GUI；不要与其他控制同一机械臂的 GUI/遥操会话并行：
 
@@ -29,7 +39,7 @@ cd /home/tiancai/liuzihao/starVLA_feature
 1. 检查模型连接，可开启相机预览。检查连接和启动网页本身不初始化机械臂。
 2. 设定 collection ID、seed namespace、任务文本、关节限速（默认 0.3 rad/s）。
 3. 点击 **执行一个 horizon**。第一次会初始化从臂/相机，可能包含驱动的夹爪标定；
-   记录首次推理前的真实关节姿态，然后请求一次推理、执行 15 步、等待。
+   记录首次推理前的真实关节姿态，然后请求一次推理、执行一个 horizon、等待。
    不调用旧启动流程的额外首动作推理/自动 ramp。30 Hz 是动作步频，不保证换段无等待。
 4. 再次点击只执行下一个 horizon，多次触发属于同一条 episode。起始姿态和任务设置保持不变。
 5. 点击 **Stop episode · 返回本轮起点**：立即取消尚未发送的预测动作，等当前请求退出，
@@ -40,7 +50,7 @@ cd /home/tiancai/liuzihao/starVLA_feature
 7. 标记或丢弃后，下一次触发开始新 episode，并重新记录其起始姿态。
 
 页面“本轮返回姿态”是固定的 episode 起点，不随 chunk 改变。
-“最新 chunk 的最后一个 action”显示最新预测第 15 步的 14 维原始目标，
+“最新 chunk 的最后一个 action”显示最新预测最后一步的 14 维原始目标，
 同时显示 chunk 编号、状态和已下发步数（例如 15/15）。页面还显示该 chunk 的模型原始动作序列中，
 相邻 action 差分乘 30 Hz 得到的全 14 维最大速度及其维度；同时单独显示“实测起点到第一个 action”也纳入的本 chunk 最大目标变化速度。
 这些值都在限速、夹爪限幅之前计算；前者反映模型 action 序列内部变化，后者能暴露绝对 joint 目标与当前姿态之间的首步跳变。

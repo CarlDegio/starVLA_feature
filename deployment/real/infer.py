@@ -23,6 +23,10 @@ TASKS = {
 
 
 def checkpoint_for(task):
+    if task == "slippers":
+        return (ROOT / "playground/Checkpoints" /
+                "qwen3fast_edl_real_place_the_slippers_on_the_shoe_rack_edl_1e-2_state" /
+                "checkpoints/steps_30000_pytorch_model.pt")
     run = f"qwen3fast_edl_real_{TASKS[task][0]}_edl_1e-2_cleaned_20261002"
     return ROOT / "playground/Checkpoints" / run / "final_model/pytorch_model.pt"
 
@@ -74,18 +78,27 @@ def load_policy(args, task):
     cfg, _ = read_mode_config(str(ckpt))
     data = cfg["datasets"]["vla_data"]
     model = cfg["framework"]["action_model"]
+    uses_state = cfg["framework"].get("state_input", {}).get("enabled", False)
     if (cfg["framework"]["name"] not in ("QwenEDL", "QwenFast")
             # Compact config.yaml omits state_dim / action_type / include_state.
             # The task's registered real data layout supplies these defaults.
             or model["action_dim"] != 14 or model.get("state_dim", 14) != 14
-            or data.get("include_state", False)
+            or (data.get("include_state", False) and not uses_state)
+            or (uses_state and cfg["framework"]["name"] != "QwenEDL")
             or data.get("action_mode") != "abs"
             or data.get("action_type", "joint_targets") != "joint_targets"
             or data.get("data_mix") != f"edl_real_{TASKS[task][0]}"):
-        raise ValueError("Checkpoint must match --task and use the real 14D absolute-joint, image-only configuration")
+        raise ValueError("Checkpoint must match --task and use real 14D absolute joints with supported state inputs")
+    state_processor = None
+    if uses_state:
+        from deployment.model_server.policy_norm_processor import PolicyNormProcessor
+        state_processor = PolicyNormProcessor(str(ckpt), unnorm_key=args.unnorm_key)
     wrapper = PolicyServerWrapper(str(ckpt), device="cuda", use_bf16=not args.no_bf16,
                                   unnorm_key=args.unnorm_key)
-    policy = YAMStarVLAPolicy(wrapper, task=task, default_prompt=args.prompt or TASKS[task][2])
+    policy = YAMStarVLAPolicy(wrapper, task=task, default_prompt=args.prompt or TASKS[task][2],
+                            state_processor=state_processor, execution_horizon=args.execution_horizon,
+                            fast_decode_mode=args.fast_decode_mode)
+    policy.metadata["state_input"] = cfg["framework"].get("state_input", {"enabled": False})
     policy.metadata["edl_details_available"] = cfg["framework"]["name"] == "QwenEDL"
     policy.metadata["edl"] = cfg["framework"].get("edl", {})
     policy.metadata["edl_uncertainty_definition"] = "action-vocabulary top-k: normalized expected entropy AU; K/sum(alpha) EU"
@@ -134,6 +147,11 @@ def main():
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8002")))
     parser.add_argument("--unnorm-key")
+    parser.add_argument("--execution-horizon", type=int, default=15,
+                        help="Return only this many leading actions after full model decoding (default: 15)")
+    parser.add_argument("--fast-decode-mode", choices=("truncate", "strict"), default="truncate",
+                        help="truncate: recover bad FAST lengths using complete frequency rows without padding; "
+                             "strict: reject every length mismatch. Neither falls back to zero actions.")
     parser.add_argument("--no-bf16", action="store_true")
     parser.add_argument("--samples-root", type=Path, default=Path(os.environ.get(
         "YAM_SAMPLES_ROOT", str(ROOT.parent / "starvla-yam-inference/samples"))))
@@ -147,6 +165,8 @@ def main():
     parser.add_argument("--skip-warmup", action="store_true",
                         help="Serve without a recorded warmup sample")
     args = parser.parse_args()
+    if args.execution_horizon < 1:
+        parser.error("--execution-horizon must be positive")
     if args.repeat < 1 or not np.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("repeat and timeout must be positive")
     if args.prompt is not None and not args.prompt.strip():

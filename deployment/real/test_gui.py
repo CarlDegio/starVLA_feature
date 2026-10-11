@@ -110,6 +110,21 @@ class GUITests(unittest.TestCase):
         self.manager.label(self.manager.recorder.metadata["episode_id"], "drop")
         self.assertFalse(path.exists())
 
+    def test_state_policy_30_step_horizon(self):
+        class StatePolicy(Policy):
+            metadata = {**Policy.metadata, "horizon": 30, "uses_state": True}
+            def infer(self, obs):
+                assert obs["state"].shape == (14,)
+                return super().infer(obs)
+        self.manager.client_factory = StatePolicy
+        result = self.manager.step(**self.args)
+        self.assertEqual(result["completed_rows"], 30)
+        progress = self.manager.status()["latest_chunk"]
+        self.assertEqual(progress["horizon"], 30)
+        self.assertEqual(len(progress["all_actions"]), 30)
+        self.finish()
+        self.manager.label(self.manager.recorder.metadata["episode_id"], "drop")
+
     def test_end_cancels_pending_response_before_return(self):
         entered, release = threading.Event(), threading.Event()
         class Slow(Policy):
