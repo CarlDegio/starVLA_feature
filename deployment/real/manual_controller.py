@@ -1,10 +1,11 @@
-"""One human trigger -> one inference -> at most one horizon; no background loop."""
+"""One human trigger -> bounded inference retries -> at most one horizon."""
 import threading
 import time
 
 import numpy as np
 
 from examples.LIBERO.edl_pred_real.recording import validate_response
+from deployment.real.inference_retry import infer_with_token_retries
 
 
 class ManualChunkController:
@@ -37,6 +38,7 @@ class ManualChunkController:
                 raise RuntimeError("Session stopped or failed; restart after checking the cause")
             self._update_progress(chunk_number=self.recorder.count + 1, horizon=self.horizon,
                                   status="inferring", completed_rows=0, last_action=None,
+                                  inference_retry=0,
                                   all_actions=None,
                                   max_model_speed=None, max_model_speed_joint=None,
                                   max_model_speed_joint_index=None, max_model_speed_step=None,
@@ -49,7 +51,22 @@ class ManualChunkController:
             observation = self.backend.observe(self.prompt)
             observation["return_edl_details"] = True
             chunk = self.recorder.begin_chunk(observation)
-            response = self.policy.infer(observation)  # Exactly ONE request.
+            def retry_observation(attempt, error):
+                nonlocal observation
+                if self.cancel.is_set():
+                    raise RuntimeError("Execution cancelled before FAST token retry")
+                observation = self.backend.observe(self.prompt)
+                observation["return_edl_details"] = True
+                self.recorder.retry_chunk(chunk, observation, attempt=attempt, error=str(error))
+                self._update_progress(inference_retry=attempt)
+                return observation
+
+            # Avoid nesting the recorded client's static-input retry loop.
+            infer_once = getattr(self.policy, "infer_once", self.policy.infer)
+            response = infer_with_token_retries(
+                infer_once, observation,
+                max_retries=getattr(self.policy, "invalid_token_retries", 3),
+                retry_observation=retry_observation)
             validate_response(response, self.horizon)
             # The adapter has already inverse-normalized these absolute joint
             # targets. Measure the model trajectory before any YAM slew limit

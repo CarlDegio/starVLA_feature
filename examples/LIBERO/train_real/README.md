@@ -212,7 +212,9 @@ cat playground/Checkpoints/.train_tasks/real_state_h30_bs32_4gpu_20261010/status
 tail -f playground/Checkpoints/.train_tasks/real_state_h30_bs32_4gpu_20261010/classification_the_blocks.log
 ```
 
-## 当前拖鞋任务 KL 对比队列（2026-10-10）
+## 已完成的拖鞋任务 KL 对比队列（2026-10-10）
+
+两个实验均已完成 30,000 步，队列状态为 `completed`，每个模型的 15,000 与 30,000 步 checkpoint 均已通过队列校验。
 
 tmux `edl_real_slippers_kl_compare_4gpu` 按顺序运行拖鞋任务的两个独立实验：`framework.edl.kl_weight=1e-2`，然后 `1e-3`。对应 run_id 为 `qwen3fast_edl_real_place_the_slippers_on_the_shoe_rack_edl_1e-2_state` 和 `qwen3fast_edl_real_place_the_slippers_on_the_shoe_rack_edl_1e-3_state`。两个实验从相同基座重新初始化、seed 42，除 KL 权重和输出名称外配置完全一致；保持同一拖鞋数据、30 步动作窗口、14 维当前 state、4 卡、每卡 BS 32、10 个 worker、VLM 峰值学习率 `1e-5`、15,000 步 KL annealing 和不累积梯度。
 
@@ -224,6 +226,44 @@ tmux `edl_real_slippers_kl_compare_4gpu` 按顺序运行拖鞋任务的两个独
 tmux attach -t edl_real_slippers_kl_compare_4gpu
 cat playground/Checkpoints/.train_tasks/slippers_kl_compare_h30_bs32_4gpu_20261010/status
 tail -f playground/Checkpoints/.train_tasks/slippers_kl_compare_h30_bs32_4gpu_20261010/slippers_kl_1e-2.log
+```
+
+## 当前试管与方块分类队列（2026-10-11）
+
+tmux `edl_real_tubes_blocks_kl1e3_4gpu` 原定先训练 `insert_the_two_tubes_into_the_rack_one_by_one`，再训练 `classification_the_blocks`。用户随后取消了尚未启动的方块分类任务，仅保留试管训练。原队列调度进程已单独停止，试管 launcher、四个训练进程及 worker 持续运行；试管完成后不会启动方块分类。`watch_tubes.py` 仅跟踪现有试管进程退出并校验训练结束日志和 checkpoint，不启动新训练，取消记录保存在队列的 `cancellation.json`。
+
+试管使用 `framework.edl.kl_weight=1e-3`，run_id 为 `qwen3fast_edl_real_insert_the_two_tubes_into_the_rack_one_by_one_edl_1e-3_state`。保持 4 卡、每卡 BS 32、10 个 DataLoader worker、归一化的 14 维当前 state、30 步动作窗口、seed 42 和原学习率。训练 30,000 步，仅保存 15,000 和 30,000 步 checkpoint；WandB 在线直连。
+
+队列、解析后配置、源码快照和日志位于 `playground/Checkpoints/.train_tasks/tubes_blocks_kl1e-3_h30_bs32_4gpu_20261011/`。两个任务先通过预检查；任一任务训练或 checkpoint 校验失败即停止队列。实际训练参数以模型目录的 `config.full.yaml` 为准，原始任务 YAML 仍保留默认 KL `1e-2`。
+
+```bash
+tmux attach -t edl_real_tubes_blocks_kl1e3_4gpu
+cat playground/Checkpoints/.train_tasks/tubes_blocks_kl1e-3_h30_bs32_4gpu_20261011/status
+tail -f playground/Checkpoints/.train_tasks/tubes_blocks_kl1e-3_h30_bs32_4gpu_20261011/insert_the_two_tubes_into_the_rack_one_by_one.log
+```
+
+## 新机器方块分类任务（2026-10-11）
+
+在有 8 张 B200 的新机器上，按用户要求仅使用 GPU 0–3，tmux `edl_real_blocks_kl1e3_4gpu` 独立训练方块分类，与原机器的试管任务并行。run_id 为 `qwen3fast_edl_real_classification_the_blocks_edl_1e-3_state`，KL `1e-3`，每卡 BS 32、全局 BS 128、每卡 10 个 DataLoader worker。保留归一化的 14 维当前 state、30 步动作窗口、seed 42 和原学习率，从原始基座初始化。
+
+训练 30,000 步，仅保存 15,000 和 30,000 步 checkpoint，WandB 在线直连。作业、源码及配置快照、日志在 `playground/Checkpoints/.train_tasks/blocks_kl1e-3_h30_bs32_4gpu_20261011/`，实际配置以模型目录的 `config.full.yaml` 为准。原机器队列仍不启动方块分类。
+
+```bash
+tmux attach -t edl_real_blocks_kl1e3_4gpu
+cat playground/Checkpoints/.train_tasks/blocks_kl1e-3_h30_bs32_4gpu_20261011/status
+tail -f playground/Checkpoints/.train_tasks/blocks_kl1e-3_h30_bs32_4gpu_20261011/classification_the_blocks.log
+```
+
+## 方块分类四卡重提（2026-10-11）
+
+前一次四卡方块分类在约 3,620 步退出，没有保存 checkpoint。按用户要求重新提交，从同一基座初始化；保留失败日志，使用新 run_id `qwen3fast_edl_real_classification_the_blocks_edl_1e-3_state_retry1_20261011`。4 卡（GPU 0–3）、每卡 BS 32、全局 BS 128、每卡 10 个 worker、KL `1e-3`、归一化 14 维 state、30 步动作窗口及原学习率均保持一致。训练 30,000 步，仅保存 15,000/30,000 步 checkpoint，WandB 在线直连。
+
+新作业在 `playground/Checkpoints/.train_tasks/blocks_kl1e-3_h30_bs32_4gpu_retry1_20261011/`，tmux 会话为 `edl_real_blocks_kl1e3_4gpu_retry1`。本次启用无缓冲日志和 Python fault handler，关闭 WandB 控制台捕获以直接保留 stdout/stderr，同时仅过滤重复的 torchvision 视频接口弃用警告；WandB 指标记录保持开启。
+
+```bash
+tmux attach -t edl_real_blocks_kl1e3_4gpu_retry1
+cat playground/Checkpoints/.train_tasks/blocks_kl1e-3_h30_bs32_4gpu_retry1_20261011/status
+tail -f playground/Checkpoints/.train_tasks/blocks_kl1e-3_h30_bs32_4gpu_retry1_20261011/classification_the_blocks.log
 ```
 
 ## 历史服务器的单机 8 卡作业（2026-10-02）

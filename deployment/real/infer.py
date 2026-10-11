@@ -41,27 +41,49 @@ def load_sample(path, prompt):
 
 class RecordedClient:
     """Bounded connection and response waits; never imports a robot driver."""
-    def __init__(self, host, port, timeout):
+    def __init__(self, host, port, timeout, *, invalid_token_retries=3):
+        if type(invalid_token_retries) is not int or invalid_token_retries < 0:
+            raise ValueError("invalid_token_retries must be a nonnegative integer")
+        self.host, self.port, self.timeout = host, port, timeout
+        self.invalid_token_retries = invalid_token_retries
+        self._needs_reconnect = False
+        self._connect()
+
+    def _connect(self):
         from websockets.sync.client import connect
-        self.timeout = timeout
-        self.socket = connect(f"ws://{host}:{port}", compression=None, max_size=None,
+        self.socket = connect(f"ws://{self.host}:{self.port}", compression=None, max_size=None,
                               proxy=None, open_timeout=10)
         try:
-            self.metadata = msgpack_numpy.unpackb(self.socket.recv(timeout=timeout))
-            if (self.metadata.get("backend") != "starvla"
-                    or self.metadata.get("state_dim") != 14
-                    or self.metadata.get("action_dim") != 14
-                    or not isinstance(self.metadata.get("horizon"), int)
-                    or self.metadata["horizon"] < 1):
-                raise ValueError(f"Not a StarVLA YAM server: {self.metadata}")
+            metadata = msgpack_numpy.unpackb(self.socket.recv(timeout=self.timeout))
+            if (metadata.get("backend") != "starvla"
+                    or metadata.get("state_dim") != 14
+                    or metadata.get("action_dim") != 14
+                    or not isinstance(metadata.get("horizon"), int)
+                    or metadata["horizon"] < 1):
+                raise ValueError(f"Not a StarVLA YAM server: {metadata}")
+            if hasattr(self, "metadata") and metadata != self.metadata:
+                raise ValueError("Policy server metadata changed during reconnect")
+            self.metadata = metadata
+            self._needs_reconnect = False
         except Exception:
             self.socket.close()
             raise
 
     def infer(self, obs):
+        from deployment.real.inference_retry import infer_with_token_retries
+        return infer_with_token_retries(self.infer_once, obs, max_retries=self.invalid_token_retries)
+
+    def infer_once(self, obs):
+        """One wire request; live controllers handle retries using fresh inputs."""
+        if self._needs_reconnect:
+            self.socket.close()
+            self._connect()
         self.socket.send(msgpack_numpy.packb(obs))
         response = self.socket.recv(timeout=self.timeout)
         if isinstance(response, str):
+            # The server closes error responses with code 1011. Reconnect
+            # before any retry, checking that the checkpoint is unchanged.
+            self._needs_reconnect = True
             raise RuntimeError(response)
         return msgpack_numpy.unpackb(response)
 
@@ -150,8 +172,8 @@ def main():
     parser.add_argument("--execution-horizon", type=int, default=15,
                         help="Return only this many leading actions after full model decoding (default: 15)")
     parser.add_argument("--fast-decode-mode", choices=("truncate", "strict"), default="truncate",
-                        help="truncate: recover bad FAST lengths using complete frequency rows without padding; "
-                             "strict: reject every length mismatch. Neither falls back to zero actions.")
+                        help="truncate: zero-pad/truncate DCT coefficients to the fixed model horizon; "
+                             "strict: reject every length mismatch. Invalid Unicode remains an error.")
     parser.add_argument("--no-bf16", action="store_true")
     parser.add_argument("--samples-root", type=Path, default=Path(os.environ.get(
         "YAM_SAMPLES_ROOT", str(ROOT.parent / "starvla-yam-inference/samples"))))
@@ -162,11 +184,15 @@ def main():
                         help="Use the NPZ prompt verbatim instead of the task default")
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--invalid-token-retries", type=int, default=3,
+                        help="client mode: additional requests after invalid FAST Unicode (default: 3)")
     parser.add_argument("--skip-warmup", action="store_true",
                         help="Serve without a recorded warmup sample")
     args = parser.parse_args()
     if args.execution_horizon < 1:
         parser.error("--execution-horizon must be positive")
+    if args.invalid_token_retries < 0:
+        parser.error("--invalid-token-retries must be nonnegative")
     if args.repeat < 1 or not np.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("repeat and timeout must be positive")
     if args.prompt is not None and not args.prompt.strip():
@@ -180,7 +206,8 @@ def main():
     policy = None
     try:
         if args.mode == "client":
-            policy = RecordedClient(args.host, args.port, args.timeout)
+            policy = RecordedClient(args.host, args.port, args.timeout,
+                                    invalid_token_retries=args.invalid_token_retries)
             task = policy.metadata["task"]
             if args.task and args.task != task:
                 raise ValueError(f"Requested task {args.task} but server task is {task}")

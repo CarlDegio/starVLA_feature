@@ -47,12 +47,15 @@ bash examples/LIBERO/virtual_client/run.sh --task slippers --episode 0 --start-f
 client 自动跟随 server 返回的 `horizon`，无需另设跳步参数。旧进程需重启 server 才会生效；
 启动时会打印模型 horizon 和实际帧步长，报告也保存 `frame_stride`。
 用 server 的 `--execution-horizon 30` 可以恢复原先每 30 帧推理。
-real server 默认 `--fast-decode-mode truncate`，长度异常时截到完整 DCT 系数行后解码，不补零，
-再返回前 15 步。`--fast-decode-mode strict` 可以拒绝全部长度错误。
-含 U+FFFD 或不足 15 行的预测会明确报错，不回退到均值动作。当前虚拟 client 遇到此类错误会停止，
+real server 默认 `--fast-decode-mode truncate`，长度异常时将实际 DCT 系数补零或截断到 420 个，
+固定按 30×14 做逆 DCT，再返回前 15 步。补零在还原 `min_token` 偏移后进行，长度不足不再拒绝。
+`--fast-decode-mode strict` 可以拒绝全部长度错误。含 U+FFFD 或重构结果非有限值仍明确报错。
+虚拟 client 对 U+FFFD 非法字符拒绝默认额外重试 3 次（总共最多 4 次），自动重连并核对模型 metadata；
+重试始终使用同一帧图像和 state，确定性生成下结果通常不会改变。`--invalid-token-retries 0` 关闭重试。
+四次均失败或遇到其他错误时停止，
 已写入的 chunk 保留，summary 标记 error；可用 `--start-frame` 从其他帧开始独立测试。
-EDL token 诊断仍对应完整模型预测；`diagnostic__full_model_actions` 保留实际解码的完整序列（恢复时可能为 29 步等），
-`diagnostic__fast_decode_*` 保存原系数长度、截断量和实际解码步数。
+EDL token 诊断仍对应完整模型预测；`diagnostic__full_model_actions` 保留恢复后的完整 30 步序列，
+`diagnostic__fast_decode_*` 保存原系数长度、截断量、补零量和固定的解码步数。
 
 图像按转换数据的帧索引顺序解码，RGB 格式；state/GT 从训练数据的
 `左臂6、右臂6、左夹爪、右夹爪` 重排为协议使用的
@@ -82,6 +85,22 @@ EDL token 诊断仍对应完整模型预测；`diagnostic__full_model_actions` �
 
 关节误差和速度以 rad、rad/s 计，夹爪单独以归一化值计，不混算。
 Ctrl+C/异常时保留已写入的逐 chunk 数据，summary 标记 interrupted/error；不将其报告为完整轨迹。
+
+## 严格 FAST 解码审计（2026-10-11）
+
+使用 `--execution-horizon 30 --fast-decode-mode strict` 同时关闭执行前缀截取和异常系数长度恢复。当前普通虚拟 client 在首个拒绝 chunk 处停止；为统计整条轨迹，可使用 `audit_fast_decode`，它在进程内复用 real server 的 `load_policy` / `YAMStarVLAPolicy` 与虚拟 client 的 `Episode`，逐 chunk 捕获原始生成 token、EOS、DCT 系数长度，记录拒绝后继续。无效 chunk 不生成动作文件、不补零、不截断。
+
+```bash
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0 python -m examples.LIBERO.virtual_client.audit_fast_decode \
+  --ckpt playground/Checkpoints/qwen3fast_edl_real_place_the_slippers_on_the_shoe_rack_edl_1e-3_state/checkpoints/steps_30000_pytorch_model.pt \
+  --episode 0 --stride 15 --teacher-forced-chunks 6 --output playground/fast_decode_audit
+```
+
+本机 `steps_30000` 复现：第 0 条轨迹 827 帧，每 15 帧采样，共 56 个完整 30 步预测，39 个严格解码失败（69.64%）；其中每 30 帧采样的 28 个 chunk 有 19 个失败（67.86%）。全部 GT 编码得到 420 个合法系数；全部输入图像、语言和归一化 state 与训练读取器一致，前 6 个训练 prompt 前缀与生成 prompt 逐 token 相同。生成无一次达到 256 token 上限，全部以 EOS 结束。前 6 个样本在真实前文下的逐 action-token 预测正确率约 72.92%，其拼接结果均不满足严格解码长度。
+
+训练 forward 监督的是 GT FAST token；评估实际生成预测时，原始 FAST `decode()` 捕获长度错误并返回零动作，训练继续，MSE 也未单独记录解码有效率。拖鞋 `1e-3` 训练日志有 3,098 次此类错误；300 次评估 × 4 卡 × 每卡 4 个 chunk，共 4,800 个，约 64.54%。因此高失败率在训练评估中已存在。零归一化动作经 q01/q99 逆变换得到分位区间中心，不是恢复成功的轨迹或数据均值。
+
+原始审计结果在 `playground/.env_setup/fast_decode_audit_20261011/`：`slippers_ep0_strict_run2/summary.json`、逐 chunk JSONL/原始 token NPZ、训练日志错误统计，以及严格 WebSocket client 的失败报告。420 指逆 BPE 后的 DCT 系数数量，不是模型必须生成 420 个 FAST token。模型未受到整条序列解码长度约束，token 预测错误可能改变展开系数个数；本次证据支持模型输出结构错误，而非该轨迹输入预处理不一致。
 
 ## 依赖与测试
 

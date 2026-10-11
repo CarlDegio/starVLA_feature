@@ -109,6 +109,26 @@ class EpisodeRecorder:
         self.event(chunk, "prediction_saved", policy_timing=response.get("policy_timing", {}),
                    server_timing=response.get("server_timing", {}))
 
+    def retry_chunk(self, chunk, observation, *, attempt, error):
+        """Archive the failed request, then persist fresh inputs before retrying.
+
+        The canonical observation/request always belong to the latest attempt,
+        so existing exports remain aligned with the successful prediction.
+        """
+        if self.closed or type(attempt) is not int or attempt < 1:
+            raise ValueError("Retry requires an open episode and a positive attempt")
+        for name, suffix in (("observation", "npz"), ("request", "json")):
+            archive = chunk / f"inference_attempt_{attempt - 1:02d}_{name}.{suffix}"
+            if archive.exists():
+                raise FileExistsError(archive)
+            (chunk / f"{name}.{suffix}").rename(archive)
+        write_npz(chunk / "observation.npz", state=observation["state"],
+                  **{f"image_{role}": observation["images"][role] for role in ("top", "left", "right")})
+        write_json(chunk / "request.json", {"chunk_idx": int(chunk.name.removeprefix("chunk_")),
+                   "prompt": observation["prompt"], "captured_at": now(),
+                   "captured_monotonic_ns": time.monotonic_ns(), "inference_retry": attempt})
+        self.event(chunk, "inference_retry", attempt=attempt, error=error)
+
     def event(self, chunk, kind, **payload):
         with (chunk / "events.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"event": kind, "utc": now(),

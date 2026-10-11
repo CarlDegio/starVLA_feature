@@ -104,6 +104,53 @@ class RecorderTests(unittest.TestCase):
         result = json.loads((self.rec.path / "chunk_000000/result.json").read_text())
         self.assertEqual(result["status"], "cancelled")
 
+    def test_invalid_tokens_retry_fresh_observations_then_execute_once(self):
+        captures, seen = [], []
+        original_observe, original_infer = self.backend.observe, self.policy.infer
+        def observe(prompt):
+            obs = original_observe(prompt)
+            obs['state'][:] = len(captures)
+            obs['images']['top'][:] = len(captures)
+            captures.append(obs)
+            return obs
+        def infer(obs):
+            seen.append(obs)
+            self.assertEqual(self.backend.rows, [])
+            if len(seen) < 4:
+                raise RuntimeError('FAST decode rejected: U+FFFD at coefficient positions [2]')
+            return original_infer(obs)
+        self.backend.observe, self.policy.infer = observe, infer
+        result = self.controller.execute_once()
+        self.assertEqual(result['completed_rows'], 15)
+        self.assertEqual(len(self.backend.rows), 15)
+        self.assertEqual([obs['state'][0] for obs in seen], [0,1,2,3])
+        chunk = self.rec.path / 'chunk_000000'
+        with np.load(chunk / 'observation.npz') as obs:
+            np.testing.assert_array_equal(obs['state'], captures[-1]['state'])
+        for i in range(3):
+            with np.load(chunk / f'inference_attempt_{i:02d}_observation.npz') as obs:
+                np.testing.assert_array_equal(obs['state'], captures[i]['state'])
+        self.assertEqual(json.loads((chunk / 'request.json').read_text())['inference_retry'], 3)
+        with np.load(chunk / 'prediction.npz') as prediction:
+            self.assertEqual(prediction['diagnostic__fast_decode_retry_count'].tolist(), [3])
+
+    def test_invalid_tokens_exhaustion_and_stop_send_no_actions(self):
+        for stop in (False, True):
+            with self.subTest(stop=stop):
+                self.controller.cancel.clear(); self.controller.failed = False
+                seen = []
+                def infer(obs):
+                    seen.append(obs)
+                    if stop:
+                        self.controller.stop()
+                    raise RuntimeError('FAST decode rejected: U+FFFD at coefficient positions [2]')
+                self.policy.infer = infer
+                with self.assertRaises(RuntimeError):
+                    self.controller.execute_once()
+                self.assertEqual(len(seen), 1 if stop else 4)
+                self.assertEqual(self.backend.rows, [])
+                self.assertTrue(self.controller.cancel.is_set())
+
     def test_bad_diagnostics_and_write_failure_send_no_actions(self):
         original = self.policy.infer
         def bad(obs):

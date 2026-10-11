@@ -254,10 +254,14 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8002)
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--invalid-token-retries", type=int, default=3,
+                        help="Additional requests after invalid FAST Unicode; same recorded observation")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if not np.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be positive")
+    if args.invalid_token_retries < 0:
+        parser.error("invalid-token-retries must be nonnegative")
     root = args.data_root if (args.data_root / "meta/info.json").is_file() else args.data_root / TASKS[args.task][0]
     if root.name != TASKS[args.task][0]:
         parser.error("data-root subset name must match --task")
@@ -265,7 +269,8 @@ def main():
     episode = Episode(root, args.episode)
     client = None
     try:
-        client = RecordedClient(args.host, args.port, args.timeout)
+        client = RecordedClient(args.host, args.port, args.timeout,
+                                invalid_token_retries=args.invalid_token_retries)
         summary = replay(client, episode, output, task=args.task, start_frame=args.start_frame,
                          max_chunks=args.max_chunks, step=args.step)
         print(json.dumps({"output": str(output.resolve()), "report": str((output / 'report.html').resolve()),

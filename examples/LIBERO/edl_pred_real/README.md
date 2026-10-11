@@ -1,9 +1,13 @@
 # 真机单次执行与 EDL 采集
 
 单次执行由 **YAM 客户端**控制。模型 server 常驻，收到一次请求就返回一个 chunk；
-GUI/终端跟随服务返回的 horizon，每次人工触发最多执行一个 chunk，然后等待，不会自动重推理。
+GUI/终端跟随服务返回的 horizon，每次人工触发最多执行一个 chunk，然后等待。
+若 FAST 因 U+FFFD 非法字符拒绝，客户端重新读取图像和 state，最多额外重试 3 次；
+初始请求加重试总共最多 4 次，成功后仍只执行一个 chunk。
+重试期间不发送失败动作；四次都失败会停止本次执行，Stop episode 可阻止后续重试。
+模型仍使用确定性生成，新观测可能改善结果，但不保证重试成功。
 旧模型预测 15 步；新 slippers state 模型预测 30 步。服务默认仅返回前 15 步、30 Hz（标称执行窗口 0.5 秒）。
-可用服务参数 `--execution-horizon 30` 恢复完整 30 步输出。real server 默认对长度错误截取完整 DCT 系数行后解码，不补零；含 U+FFFD 或不足执行步数时明确报错，不发动作。
+可用服务参数 `--execution-horizon 30` 恢复完整 30 步输出。real server 默认将长度异常的实际 DCT 系数补零或截断到 420 个，固定按 30 步逆 DCT，再返回前 15 步；含 U+FFFD 或重构结果非有限值时仍明确报错，不发动作。
 EDL 诊断对应完整模型预测；详细记录保留 `diagnostic__full_model_actions`，不能将 token 不确定性直接当作前 15 步的不确定性。
 记录也保存在客户端，因为客户端知道输入、预测、实际发送情况及人工 episode 标签。
 server 负责计算 EDL 诊断，可选返回 top-k Dirichlet 参数，不判断真实任务成败。
@@ -39,7 +43,7 @@ cd /home/tiancai/liuzihao/starVLA_feature
 1. 检查模型连接，可开启相机预览。检查连接和启动网页本身不初始化机械臂。
 2. 设定 collection ID、seed namespace、任务文本、关节限速（默认 0.3 rad/s）。
 3. 点击 **执行一个 horizon**。第一次会初始化从臂/相机，可能包含驱动的夹爪标定；
-   记录首次推理前的真实关节姿态，然后请求一次推理、执行一个 horizon、等待。
+   记录首次推理前的真实关节姿态，然后请求推理（非法字符时最多额外重试三次）、执行一个 horizon、等待。
    不调用旧启动流程的额外首动作推理/自动 ramp。30 Hz 是动作步频，不保证换段无等待。
 4. 再次点击只执行下一个 horizon，多次触发属于同一条 episode。起始姿态和任务设置保持不变。
 5. 点击 **Stop episode · 返回本轮起点**：立即取消尚未发送的预测动作，等当前请求退出，
@@ -97,6 +101,9 @@ end_episode.json                # 结束/回位结果
 ```
 
 每次先把请求和预测落盘，成功后才允许发送动作。磁盘写入失败会停止继续执行。
+重试的旧请求保留在 `inference_attempt_00_observation.npz` / `inference_attempt_00_request.json` 等文件；
+`observation.npz` / `request.json` 始终记录最后一次请求，成功时与 `prediction.npz` 对齐。
+`events.jsonl` 记录每次重试的原因；成功预测诊断包含 `fast_decode_inference_attempts` / `fast_decode_retry_count`。
 `command_attempt` 表示即将调用驱动；`command_returned` 表示调用已正常返回，
 其中 `effective_target` 是驱动报告的目标，不是机械臂实际到达的位置。
 `measured_before/after` 保存该步读到的真实状态；两只臂分别记录，能区分中途一侧失败。

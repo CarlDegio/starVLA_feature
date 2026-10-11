@@ -131,7 +131,7 @@ class YAMStarVLAPolicy:
                             **decode_diagnostics},
         }
         if obs.get("return_edl_details", False):
-            # Keep the full decoded prediction for audits; token evidence still
+            # Keep the full fixed-horizon reconstruction for audits; token evidence still
             # describes the model horizon, not just the executed prefix.
             response["diagnostics"]["full_model_actions"] = np.ascontiguousarray(actions[0][:, STAR_TO_YAM])
             # Exact PIL images supplied to Qwen; its processor performs the

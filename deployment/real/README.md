@@ -28,17 +28,30 @@ cd /home/tiancai/liuzihao/starVLA_feature
 `--execution-horizon 30` 可恢复 30 步模型的完整输出；不能超过 checkpoint 的 horizon。
 握手中 `model_horizon` 是模型预测长度，`horizon` / `action_chunk_size` / `open_loop_horizon`
 是实际返回和执行长度。real server 默认 `--fast-decode-mode truncate`：
-正常长度保持原解码；长度错误时保留最多模型 horizon 行的完整 14 维 DCT 系数行，
-不补零，以实际保留行数做逆 DCT，再取前 `execution_horizon` 步。
-例如 418→406 系数→29 步→前 15 步；421→420 系数→30 步→前 15 步。
-这会改变短序列的时间基底和幅值缩放，并不等于可靠地删除错误时间步。
-含 Unicode 替换字符 U+FFFD、完整行不足执行长度时明确报错，不回退到零动作或统计中点。
+正常长度保持原解码；长度错误时将实际 DCT 系数补零或截断到 `model_horizon×14`，
+始终使用模型 horizon 做逆 DCT，再取前 `execution_horizon` 步。`truncate` 名称保留以兼容原启动命令。
+例如 418→补两个零→420 系数→30 步→前 15 步；421→截掉一个→420 系数→30 步→前 15 步。
+补零在还原 tokenizer 的 `min_token` 偏移后进行，补的是实际频域零值，不是字符或 token ID 零。
+长度不足不再拒绝或改用较短的逆 DCT；即使没有系数也按模型 horizon 补齐，并记录全部补零。
+含 Unicode 替换字符 U+FFFD、重构动作非有限值时仍明确报错。
 `--fast-decode-mode strict` 则拒绝所有长度错误。普通 LIBERO 服务和训练逻辑不变。
 EDL token 诊断仍对应完整生成序列；详细诊断中的 `full_model_actions` 保留本次实际解码的
-完整反归一化动作（YAM 顺序，可能是 29×14 等）。`fast_decode_recovered`、
+完整反归一化动作（YAM 顺序，固定为模型 horizon，30 步模型为 30×14）。`fast_decode_recovered`、
 `fast_decode_coefficient_count`、`fast_decode_used_coefficients`、
-`fast_decode_dropped_coefficients`、`fast_decode_horizon` 记录恢复情况。
+`fast_decode_dropped_coefficients`、`fast_decode_padded_coefficients`、`fast_decode_horizon` 记录恢复情况；
+`used_coefficients` 是实际保留的原始系数数量，不包含补零。
 不可恢复的请求在服务日志及错误响应中包含原因、系数数目和 FAST token IDs；客户端不应执行。
+
+真机手动 GUI 客户端遇到 U+FFFD 非法字符拒绝时，默认额外请求最多 **3 次**（含初始请求最多 4 次）。
+每次重试重新读取三路图像与实测 state，保存请求后才发起推理；失败请求不下发动作。
+错误响应会关闭连接，因此客户端自动重连并核对服务 metadata/权重一致。
+四次都失败则保留错误记录并停止本次执行；Stop episode 可阻止后续重试和动作下发。
+只重试非法字符拒绝，长度错误的 strict 拒绝、非有限动作、网络/输入/记录错误不会自动重试。
+虚拟 client 和 `infer client` 默认同样重试 3 次，但使用同一份录制观测；
+`--invalid-token-retries 0` 可关闭它们的重试。
+服务本身不缓存旧动作或填充失败动作。生成仍为 `do_sample=False`，相同观测的结果通常相同；
+新观测可能改变生成结果，但不保证重试成功。请求次数增加时总等待时间也会增加。
+成功响应诊断中的 `fast_decode_inference_attempts` / `fast_decode_retry_count` 记录尝试/重试次数。
 
 默认 `127.0.0.1:8002`、GPU 0、BF16、`starvla` conda 环境，本地离线加载。
 默认用对应任务的一份录制样本预热，监听成功才打印 `READY`。
